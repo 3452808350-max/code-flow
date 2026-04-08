@@ -1,10 +1,24 @@
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+COPY frontend/package*.json ./
+
+RUN npm ci
+
+RUN chmod -R +x node_modules/.bin/
+
+COPY frontend/ .
+
+RUN npm run build
+
 FROM nginx:alpine
 
-# 复制前端文件
-COPY frontend/ /usr/share/nginx/html/
-
-# 复制Nginx配置
+COPY --from=builder /app/dist /usr/share/nginx/html/
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1/ || exit 1
 
 EXPOSE 80
 

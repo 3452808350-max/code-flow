@@ -1,0 +1,360 @@
+from __future__ import annotations
+
+import json
+
+from .boundary.gateway import ToolGateway
+from .constraints.engine import ConstraintEngine
+from .context.manager import ContextManager
+from .improvement.service import ImprovementService
+from .optimizer.service import OptimizerService
+from .orchestrator.service import OrchestratorService
+from .prompting.assembler import PromptAssembler
+from .runtime.models import ModelRegistry
+from .runtime.service import RuntimeService
+from .storage import HarnessLabDatabase
+from .types import ConstraintDocument, ContextProfile, HarnessPolicy, ModelProfile, PromptTemplate, WorkflowTemplateVersion
+from .utils import utc_now
+from .workers.service import WorkerService
+
+
+class HarnessLabServices:
+    """Service container and default catalog bootstrap."""
+
+    def __init__(self) -> None:
+        self.database = HarnessLabDatabase()
+        self.constraint_engine = ConstraintEngine(self.database)
+        self.context_manager = ContextManager(self.database)
+        self.tool_gateway = ToolGateway(self.database, self.constraint_engine)
+        self.model_registry = ModelRegistry()
+        self.orchestrator = OrchestratorService()
+        self.prompt_assembler = PromptAssembler()
+        self.workers = WorkerService(self.database)
+        self.runtime = RuntimeService(
+            database=self.database,
+            context_manager=self.context_manager,
+            constraint_engine=self.constraint_engine,
+            tool_gateway=self.tool_gateway,
+            model_registry=self.model_registry,
+            orchestrator=self.orchestrator,
+            prompt_assembler=self.prompt_assembler,
+            worker_service=self.workers,
+        )
+        self.optimizer = OptimizerService(self.database)
+        self.improvement = ImprovementService(self.database)
+        self._seed_defaults()
+
+    def _seed_defaults(self) -> None:
+        now = utc_now()
+        constraint = ConstraintDocument(
+            document_id="constraint_lab_research_v1",
+            title="Harness Lab Research Guardrails",
+            body=(
+                "Use layered context instead of prompt stuffing. Prefer read-first inspection. "
+                "Read-only filesystem and git inspection are allowed. Filesystem writes require approval. "
+                "Destructive shell operations such as rm, chmod, chown, git commit, git push, and sed -i are denied. "
+                "Unknown shell commands escalate to review. Replays and policy verdicts must remain visible."
+            ),
+            scope="global",
+            status="published",
+            tags=["research", "deny-destructive"],
+            priority=90,
+            source="bootstrap",
+            version="v1",
+            created_at=now,
+            updated_at=now,
+        )
+        self.database.upsert_row(
+            "constraints_documents",
+            {
+                "document_id": constraint.document_id,
+                "title": constraint.title,
+                "scope": constraint.scope,
+                "status": constraint.status,
+                "version": constraint.version,
+                "payload_json": json.dumps(constraint.model_dump(), ensure_ascii=False),
+                "created_at": constraint.created_at,
+                "updated_at": constraint.updated_at,
+            },
+            "document_id",
+        )
+
+        context_profile = ContextProfile(
+            context_profile_id="context_profile_layered_v1",
+            name="Layered Research Context",
+            description="Four-layer context strategy with structure/task/history/index separation.",
+            status="published",
+            config={"max_tokens": 1400, "max_blocks": 8, "history_limit": 2, "index_limit": 6},
+            created_at=now,
+            updated_at=now,
+        )
+        self.database.upsert_row(
+            "context_profiles",
+            {
+                "context_profile_id": context_profile.context_profile_id,
+                "name": context_profile.name,
+                "status": context_profile.status,
+                "payload_json": json.dumps(context_profile.model_dump(), ensure_ascii=False),
+                "created_at": context_profile.created_at,
+                "updated_at": context_profile.updated_at,
+            },
+            "context_profile_id",
+        )
+
+        prompt_template = PromptTemplate(
+            prompt_template_id="prompt_template_structured_v1",
+            name="Structured Harness Prompt",
+            description="Fixed section order: constraints, goal, reference, context, history.",
+            status="published",
+            sections=["CONSTRAINTS", "GOAL", "REFERENCE", "CONTEXT", "HISTORY"],
+            created_at=now,
+            updated_at=now,
+        )
+        self.database.upsert_row(
+            "prompt_templates",
+            {
+                "prompt_template_id": prompt_template.prompt_template_id,
+                "name": prompt_template.name,
+                "status": prompt_template.status,
+                "payload_json": json.dumps(prompt_template.model_dump(), ensure_ascii=False),
+                "created_at": prompt_template.created_at,
+                "updated_at": prompt_template.updated_at,
+            },
+            "prompt_template_id",
+        )
+
+        workflow_template = WorkflowTemplateVersion(
+            workflow_id="workflow_template_mission_control_v1",
+            parent_id=None,
+            name="Mission Control Baseline",
+            description="Wave-ready baseline with parallel context and policy preparation before execution.",
+            scope="global",
+            status="published",
+            dag={
+                "nodes": [
+                    {"key": "plan", "label": "Plan Mission", "kind": "planning", "role": "planner"},
+                    {"key": "context", "label": "Assemble Context", "kind": "context", "role": "planner"},
+                    {"key": "prompt", "label": "Render Prompt Frame", "kind": "prompt", "role": "planner"},
+                    {"key": "policy", "label": "Run Policy Preflight", "kind": "policy", "role": "reviewer"},
+                    {"key": "execute", "label": "Execute Action", "kind": "execution", "role": "executor"},
+                    {"key": "review", "label": "Review Outcome", "kind": "review", "role": "reviewer"},
+                    {"key": "learn", "label": "Persist Learnings", "kind": "learning", "role": "recovery"},
+                ],
+                "edges": [
+                    {"source": "plan", "target": "context", "kind": "depends_on"},
+                    {"source": "plan", "target": "policy", "kind": "depends_on"},
+                    {"source": "context", "target": "prompt", "kind": "depends_on"},
+                    {"source": "prompt", "target": "execute", "kind": "depends_on"},
+                    {"source": "policy", "target": "execute", "kind": "depends_on"},
+                    {"source": "execute", "target": "review", "kind": "depends_on"},
+                    {"source": "review", "target": "learn", "kind": "depends_on"},
+                ],
+            },
+            role_map={
+                "planner": "Creates bounded task packets and context bundles.",
+                "executor": "Performs the selected tool action inside policy boundaries.",
+                "reviewer": "Checks the result before the run is marked complete.",
+                "recovery": "Captures learnings and prepares retry-ready recovery traces.",
+            },
+            gates=[
+                {"kind": "policy_preflight", "owner": "planner"},
+                {"kind": "review_gate", "owner": "reviewer", "when": "after_execution"},
+            ],
+            metrics={"success_rate": 0.0, "safety_score": 1.0},
+            created_at=now,
+            updated_at=now,
+        )
+        self.database.upsert_row(
+            "workflow_templates",
+            {
+                "workflow_id": workflow_template.workflow_id,
+                "name": workflow_template.name,
+                "status": workflow_template.status,
+                "payload_json": json.dumps(workflow_template.model_dump(), ensure_ascii=False),
+                "created_at": workflow_template.created_at,
+                "updated_at": workflow_template.updated_at,
+            },
+            "workflow_id",
+        )
+
+        workflow_candidate = WorkflowTemplateVersion(
+            workflow_id="workflow_template_recovery_ring_v1",
+            parent_id=workflow_template.workflow_id,
+            name="Recovery Ring Candidate",
+            description="Candidate workflow with explicit recovery and escalation guards.",
+            scope="global",
+            status="candidate",
+            dag={
+                "nodes": [
+                    {"key": "plan", "label": "Plan Mission", "kind": "planning", "role": "planner"},
+                    {"key": "context", "label": "Assemble Context", "kind": "context", "role": "planner"},
+                    {"key": "prompt", "label": "Render Prompt Frame", "kind": "prompt", "role": "planner"},
+                    {"key": "policy", "label": "Run Policy Preflight", "kind": "policy", "role": "reviewer"},
+                    {"key": "execute", "label": "Execute Action", "kind": "execution", "role": "executor"},
+                    {"key": "recovery", "label": "Recovery Triage", "kind": "recovery", "role": "recovery"},
+                    {"key": "review", "label": "Review Outcome", "kind": "review", "role": "reviewer"},
+                    {"key": "learn", "label": "Persist Learnings", "kind": "learning", "role": "recovery"},
+                ],
+                "edges": [
+                    {"source": "plan", "target": "context", "kind": "depends_on"},
+                    {"source": "plan", "target": "policy", "kind": "depends_on"},
+                    {"source": "context", "target": "prompt", "kind": "depends_on"},
+                    {"source": "prompt", "target": "execute", "kind": "depends_on"},
+                    {"source": "policy", "target": "execute", "kind": "depends_on"},
+                    {"source": "execute", "target": "recovery", "kind": "on_failure"},
+                    {"source": "execute", "target": "review", "kind": "depends_on"},
+                    {"source": "recovery", "target": "review", "kind": "handoff"},
+                    {"source": "review", "target": "learn", "kind": "depends_on"},
+                ],
+            },
+            role_map=workflow_template.role_map,
+            gates=[
+                {"kind": "policy_preflight", "owner": "planner"},
+                {"kind": "retry_gate", "owner": "recovery", "max_attempts": 2},
+                {"kind": "review_gate", "owner": "reviewer", "when": "after_execution"},
+            ],
+            metrics={"success_rate": 0.0, "safety_score": 1.0},
+            created_at=now,
+            updated_at=now,
+        )
+        self.database.upsert_row(
+            "workflow_templates",
+            {
+                "workflow_id": workflow_candidate.workflow_id,
+                "name": workflow_candidate.name,
+                "status": workflow_candidate.status,
+                "payload_json": json.dumps(workflow_candidate.model_dump(), ensure_ascii=False),
+                "created_at": workflow_candidate.created_at,
+                "updated_at": workflow_candidate.updated_at,
+            },
+            "workflow_id",
+        )
+
+        model_profile = ModelProfile(
+            model_profile_id="model_profile_lab_balanced_v1",
+            name="DeepSeek Research Balanced",
+            provider="deepseek",
+            profile="balanced",
+            status="published",
+            config={
+                "mode": "chat",
+                "model_name": "deepseek-chat",
+                "notes": "Provider-backed research profile with heuristic fallback.",
+            },
+            created_at=now,
+            updated_at=now,
+        )
+        self.database.upsert_row(
+            "model_profiles",
+            {
+                "model_profile_id": model_profile.model_profile_id,
+                "name": model_profile.name,
+                "provider": model_profile.provider,
+                "profile": model_profile.profile,
+                "status": model_profile.status,
+                "payload_json": json.dumps(model_profile.model_dump(), ensure_ascii=False),
+                "created_at": model_profile.created_at,
+                "updated_at": model_profile.updated_at,
+            },
+            "model_profile_id",
+        )
+
+        baseline_policy = HarnessPolicy(
+            policy_id="policy_harness_lab_baseline_v1",
+            name="Harness Lab Baseline",
+            status="published",
+            constraint_set_id=constraint.document_id,
+            context_profile_id=context_profile.context_profile_id,
+            prompt_template_id=prompt_template.prompt_template_id,
+            model_profile_id=model_profile.model_profile_id,
+            repair_policy={"on_denial": "safe_exit", "on_failure": "trace_and_stop"},
+            budget_policy={"max_prompt_tokens": 1400, "max_context_blocks": 8},
+            metrics={"success_rate": 0.0, "approval_rate": 0.0},
+            created_at=now,
+            updated_at=now,
+        )
+        self.database.upsert_row(
+            "harness_policies",
+            {
+                "policy_id": baseline_policy.policy_id,
+                "name": baseline_policy.name,
+                "status": baseline_policy.status,
+                "constraint_set_id": baseline_policy.constraint_set_id,
+                "context_profile_id": baseline_policy.context_profile_id,
+                "prompt_template_id": baseline_policy.prompt_template_id,
+                "model_profile_id": baseline_policy.model_profile_id,
+                "payload_json": json.dumps(baseline_policy.model_dump(), ensure_ascii=False),
+                "created_at": baseline_policy.created_at,
+                "updated_at": baseline_policy.updated_at,
+            },
+            "policy_id",
+        )
+
+        explorer_policy = HarnessPolicy(
+            policy_id="policy_harness_lab_explorer_v1",
+            name="Harness Lab Explorer",
+            status="candidate",
+            constraint_set_id=constraint.document_id,
+            context_profile_id=context_profile.context_profile_id,
+            prompt_template_id=prompt_template.prompt_template_id,
+            model_profile_id=model_profile.model_profile_id,
+            repair_policy={"on_denial": "fallback_to_reflection", "on_failure": "record_trace"},
+            budget_policy={"max_prompt_tokens": 1800, "max_context_blocks": 10},
+            metrics={"success_rate": 0.0, "approval_rate": 0.0},
+            created_at=now,
+            updated_at=now,
+        )
+        self.database.upsert_row(
+            "harness_policies",
+            {
+                "policy_id": explorer_policy.policy_id,
+                "name": explorer_policy.name,
+                "status": explorer_policy.status,
+                "constraint_set_id": explorer_policy.constraint_set_id,
+                "context_profile_id": explorer_policy.context_profile_id,
+                "prompt_template_id": explorer_policy.prompt_template_id,
+                "model_profile_id": explorer_policy.model_profile_id,
+                "payload_json": json.dumps(explorer_policy.model_dump(), ensure_ascii=False),
+                "created_at": explorer_policy.created_at,
+                "updated_at": explorer_policy.updated_at,
+            },
+            "policy_id",
+        )
+
+        self.workers.ensure_default_worker()
+
+    def doctor_report(self) -> dict:
+        provider = self.runtime.get_model_provider_settings().model_dump()
+        workers = self.workers.list_workers()
+        candidates = self.improvement.list_candidates()
+        evaluations = self.improvement.list_evaluations()
+        warnings = []
+        if not provider["model_ready"]:
+            warnings.append("Model provider is not ready; runtime will use heuristic fallback.")
+        if not workers:
+            warnings.append("No workers are registered with the control plane.")
+        published_workflows = [item for item in self.improvement.list_workflows() if item.status == "published"]
+        if not published_workflows:
+            warnings.append("No published workflow template is available.")
+        return {
+            "control_plane": {
+                "sessions": len(self.runtime.list_sessions(limit=500)),
+                "runs": len(self.runtime.list_runs(limit=500)),
+                "policies": len(self.optimizer.list_policies()),
+                "workflows": len(self.improvement.list_workflows()),
+            },
+            "provider": provider,
+            "workers": {
+                "count": len(workers),
+                "healthy": len([item for item in workers if item.state in {"idle", "leased", "executing"}]),
+            },
+            "improvement_plane": {
+                "candidates": len(candidates),
+                "published_candidates": len([item for item in candidates if item.publish_status == "published"]),
+                "evaluations": len(evaluations),
+            },
+            "warnings": warnings,
+            "doctor_ready": provider["model_ready"] and bool(workers) and bool(published_workflows),
+        }
+
+
+harness_lab_services = HarnessLabServices()

@@ -3,11 +3,11 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ai-workflow-platform"
+name = "harness-lab"
 version = "1.0.0"
-description = "基于n8n的模块化AI工作流平台"
+description = "研究优先的 Harness Lab 平台"
 authors = [
-    {name = "AI Workflow Team"}
+    {name = "Harness Lab Team"}
 ]
 readme = "README.md"
 requires-python = ">=3.8"
@@ -50,12 +50,13 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-username/ai-workflow-platform"
-Repository = "https://github.com/your-username/ai-workflow-platform.git"
-Documentation = "https://github.com/your-username/ai-workflow-platform#readme"
+Homepage = "https://github.com/your-username/harness-lab"
+Repository = "https://github.com/your-username/harness-lab.git"
+Documentation = "https://github.com/your-username/harness-lab#readme"
 
 [project.scripts]
-ai-workflow = "backend.app.main:main"
+harness-lab = "backend.app.main:main"
+hlab = "backend.app.harness_lab.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

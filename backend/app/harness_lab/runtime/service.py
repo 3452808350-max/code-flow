@@ -1,0 +1,981 @@
+from __future__ import annotations
+
+import json
+from typing import Any, Dict, List, Optional, Tuple
+
+from ..boundary.gateway import ToolGateway
+from ..constraints.engine import ConstraintEngine
+from ..context.manager import ContextManager
+from ..prompting.assembler import PromptAssembler
+from ..storage import HarnessLabDatabase
+from ..types import (
+    ApprovalRequestModel,
+    ContextAssembleRequest,
+    ContextProfile,
+    EventEnvelope,
+    ExecutionTrace,
+    ExperimentRun,
+    HarnessPolicy,
+    IntentDeclaration,
+    IntentRequest,
+    ModelProfile,
+    ModelProviderSettings,
+    PolicyVerdict,
+    PromptFrame,
+    PromptRenderRequest,
+    PromptTemplate,
+    RecoveryEvent,
+    ResearchRun,
+    ResearchSession,
+    RunRequest,
+    SessionRequest,
+    TaskNode,
+    ToolCallRecord,
+    WorkflowTemplateVersion,
+)
+from ..utils import new_id, utc_now
+from ..workers.service import WorkerService
+from .models import ModelRegistry
+from ..orchestrator.service import OrchestratorService
+
+
+class RuntimeService:
+    """Harness-first runtime that turns sessions into traces and replays."""
+
+    def __init__(
+        self,
+        database: HarnessLabDatabase,
+        context_manager: ContextManager,
+        constraint_engine: ConstraintEngine,
+        tool_gateway: ToolGateway,
+        model_registry: ModelRegistry,
+        orchestrator: OrchestratorService,
+        prompt_assembler: PromptAssembler,
+        worker_service: WorkerService,
+    ) -> None:
+        self.database = database
+        self.context_manager = context_manager
+        self.constraint_engine = constraint_engine
+        self.tool_gateway = tool_gateway
+        self.model_registry = model_registry
+        self.orchestrator = orchestrator
+        self.prompt_assembler = prompt_assembler
+        self.worker_service = worker_service
+
+    def list_sessions(self, limit: int = 50) -> List[ResearchSession]:
+        rows = self.database.fetchall("SELECT payload_json FROM sessions ORDER BY created_at DESC LIMIT ?", (limit,))
+        return [ResearchSession(**json.loads(row["payload_json"])) for row in rows]
+
+    def get_session(self, session_id: str) -> ResearchSession:
+        row = self.database.fetchone("SELECT payload_json FROM sessions WHERE session_id = ?", (session_id,))
+        if not row:
+            raise ValueError("Session not found")
+        return ResearchSession(**json.loads(row["payload_json"]))
+
+    def create_session(self, request: SessionRequest) -> ResearchSession:
+        refs = self._resolve_session_refs(
+            request.constraint_set_id,
+            request.context_profile_id,
+            request.prompt_template_id,
+            request.model_profile_id,
+            request.workflow_template_id,
+        )
+        session = ResearchSession(
+            session_id=new_id("session"),
+            goal=request.goal,
+            status="configured",
+            active_policy_id=refs["policy"].policy_id,
+            workflow_template_id=refs["workflow_template"].workflow_id,
+            constraint_set_id=refs["constraint"].document_id,
+            context_profile_id=refs["context_profile"].context_profile_id,
+            prompt_template_id=refs["prompt_template"].prompt_template_id,
+            model_profile_id=refs["model_profile"].model_profile_id,
+            execution_mode=request.execution_mode,
+            context=request.context,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        session.intent_declaration, session.intent_model_call = self.model_registry.declare_intent_with_trace(
+            session,
+            refs["model_profile"],
+        )
+        session.task_graph = self.orchestrator.build_task_graph(
+            session,
+            session.intent_declaration,
+            refs["workflow_template"],
+        )
+        self._persist_session(session)
+        self.database.append_event(
+            "session.created",
+            {
+                "goal": session.goal,
+                "active_policy_id": session.active_policy_id,
+                "workflow_template_id": session.workflow_template_id,
+                "execution_mode": session.execution_mode,
+            },
+            session_id=session.session_id,
+        )
+        if session.intent_model_call:
+            self.database.append_event(
+                "model.intent_called",
+                session.intent_model_call.model_dump(),
+                session_id=session.session_id,
+            )
+        return session
+
+    def declare_intent(self, request: IntentRequest) -> IntentDeclaration:
+        if request.session_id:
+            session = self.get_session(request.session_id)
+            profile = self.get_model_profile(session.model_profile_id)
+            intent, _ = self.model_registry.declare_intent_with_trace(session, profile)
+            return intent
+        profile = self.get_model_profile(request.model_profile_id or self._default_policy().model_profile_id)
+        session = self._ephemeral_session(request.goal, request.context, profile.model_profile_id)
+        intent, _ = self.model_registry.declare_intent_with_trace(session, profile)
+        return intent
+
+    def assemble_context(self, request: ContextAssembleRequest) -> Dict[str, Any]:
+        if request.session_id:
+            session = self.get_session(request.session_id)
+            profile = self.get_context_profile(session.context_profile_id)
+        else:
+            profile_id = request.context_profile_id or self._default_policy().context_profile_id
+            session = self._ephemeral_session(request.goal or "Ad-hoc context assembly", request.context, profile_id=profile_id)
+            profile = self.get_context_profile(profile_id)
+            session.intent_declaration, session.intent_model_call = self.model_registry.declare_intent_with_trace(
+                session,
+                self.get_model_profile(session.model_profile_id),
+            )
+        blocks, summary = self.context_manager.assemble(session, profile, session.intent_declaration)
+        return {"blocks": [block.model_dump() for block in blocks], "selection_summary": summary}
+
+    def render_prompt(self, request: PromptRenderRequest) -> PromptFrame:
+        session = self.get_session(request.session_id)
+        profile = self.get_context_profile(session.context_profile_id)
+        blocks, summary = self.context_manager.assemble(session, profile, session.intent_declaration)
+        template = self.get_prompt_template(session.prompt_template_id)
+        document = self.constraint_engine.get_document(session.constraint_set_id)
+        return self.prompt_assembler.render(
+            session=session,
+            template=template,
+            constraint_document=document,
+            intent=session.intent_declaration,
+            blocks=blocks,
+            truncated_blocks=summary["truncated_blocks"],
+        )
+
+    def list_runs(self, limit: int = 50) -> List[ResearchRun]:
+        rows = self.database.fetchall("SELECT payload_json FROM runs ORDER BY created_at DESC LIMIT ?", (limit,))
+        return [ResearchRun(**json.loads(row["payload_json"])) for row in rows]
+
+    def get_run(self, run_id: str) -> ResearchRun:
+        row = self.database.fetchone("SELECT payload_json FROM runs WHERE run_id = ?", (run_id,))
+        if not row:
+            raise ValueError("Run not found")
+        return ResearchRun(**json.loads(row["payload_json"]))
+
+    async def create_run(self, request: RunRequest) -> ResearchRun:
+        session = self.get_session(request.session_id) if request.session_id else self.create_session(
+            SessionRequest(
+                goal=request.goal or "Research the current workspace",
+                context=request.context,
+                constraint_set_id=request.constraint_set_id,
+                context_profile_id=request.context_profile_id,
+                prompt_template_id=request.prompt_template_id,
+                model_profile_id=request.model_profile_id,
+                workflow_template_id=request.workflow_template_id,
+                execution_mode=request.execution_mode,
+            )
+        )
+        session.status = "running"
+        session.updated_at = utc_now()
+        self._persist_session(session)
+        self.database.append_event("run.planning_started", {"session_id": session.session_id}, session_id=session.session_id)
+
+        run_id = new_id("run")
+        context_profile = self.get_context_profile(session.context_profile_id)
+        prompt_template = self.get_prompt_template(session.prompt_template_id)
+        constraint_document = self.constraint_engine.get_document(session.constraint_set_id)
+        blocks, summary = self.context_manager.assemble(session, context_profile, session.intent_declaration)
+        prompt_frame = self.prompt_assembler.render(
+            session=session,
+            template=prompt_template,
+            constraint_document=constraint_document,
+            intent=session.intent_declaration,
+            blocks=blocks,
+            truncated_blocks=summary["truncated_blocks"],
+        )
+        verdicts = self.tool_gateway.preflight(session.intent_declaration.suggested_action, session.constraint_set_id)
+        final_verdict = self.constraint_engine.final_verdict(verdicts)
+
+        artifacts = [
+            self.tool_gateway.create_snapshot_manifest(run_id),
+            self.database.write_artifact_text(
+                run_id,
+                "context_bundle",
+                "context_blocks.json",
+                json.dumps([block.model_dump() for block in blocks], ensure_ascii=False, indent=2),
+                {"selection_summary": summary},
+            ),
+            self.database.write_artifact_text(
+                run_id,
+                "prompt_frame",
+                "prompt_frame.json",
+                json.dumps(prompt_frame.model_dump(), ensure_ascii=False, indent=2),
+                {"template_id": prompt_frame.template_id},
+            ),
+        ]
+        trace = ExecutionTrace(
+            trace_id=new_id("trace"),
+            session_id=session.session_id,
+            prompt_frame_id=prompt_frame.prompt_frame_id,
+            intent_declaration=session.intent_declaration,
+            model_calls=[session.intent_model_call] if session.intent_model_call else [],
+            context_blocks=blocks,
+            policy_verdicts=verdicts,
+            tool_calls=[],
+            recovery_events=[],
+            artifacts=artifacts,
+            status="running",
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        run = ResearchRun(
+            run_id=run_id,
+            session_id=session.session_id,
+            status="queued",
+            policy_id=session.active_policy_id,
+            workflow_template_id=session.workflow_template_id,
+            prompt_frame=prompt_frame,
+            execution_trace=trace,
+            result={},
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        self._persist_run(run)
+        self.database.append_event("intent.declared", session.intent_declaration.model_dump(), session_id=session.session_id, run_id=run_id)
+        if session.intent_model_call:
+            self.database.append_event(
+                "model.intent_called",
+                session.intent_model_call.model_dump(),
+                session_id=session.session_id,
+                run_id=run_id,
+            )
+        self.database.append_event("context.assembled", summary, session_id=session.session_id, run_id=run_id)
+        self.database.append_event(
+            "prompt.rendered",
+            {"prompt_frame_id": prompt_frame.prompt_frame_id, "total_token_estimate": prompt_frame.total_token_estimate},
+            session_id=session.session_id,
+            run_id=run_id,
+        )
+        self.database.append_event(
+            "policy.preflight",
+            {"subject": final_verdict.subject, "decision": final_verdict.decision, "matched_rule": final_verdict.matched_rule},
+            session_id=session.session_id,
+            run_id=run_id,
+        )
+        return await self._execute_task_graph(run, session, context_summary=summary, final_verdict=final_verdict)
+
+    async def resume_run(self, run_id: str) -> ResearchRun:
+        run = self.get_run(run_id)
+        if run.status != "awaiting_approval":
+            return run
+        approvals = self.database.list_approvals(run_id=run_id)
+        if not approvals:
+            return run
+        approval = approvals[0]
+        session = self.get_session(run.session_id)
+        if approval.status == "pending":
+            return run
+        if approval.decision == "deny":
+            self._mark_run_failed(run, session, "approval_denied", "Operator denied the requested high-risk action.")
+            return self.get_run(run_id)
+        if session.task_graph:
+            for node in session.task_graph.nodes:
+                if node.kind == "policy" and node.status == "blocked":
+                    node.status = "completed"
+                    node.metadata["approval_decision"] = approval.decision
+        session.status = "running"
+        session.updated_at = utc_now()
+        run.status = "running"
+        if run.execution_trace:
+            run.execution_trace.status = "running"
+            run.execution_trace.updated_at = utc_now()
+        run.updated_at = utc_now()
+        self._persist_session(session)
+        self._persist_run(run)
+        return await self._execute_task_graph(run, session)
+
+    async def resolve_approval(self, approval_id: str, decision: str) -> ApprovalRequestModel:
+        approval = self.database.resolve_approval(approval_id, decision)
+        run = self.get_run(approval.run_id)
+        self.database.append_event(
+            "approval.resolved",
+            {"approval_id": approval_id, "decision": decision, "status": approval.status},
+            session_id=run.session_id,
+            run_id=run.run_id,
+        )
+        await self.resume_run(run.run_id)
+        return self.database.get_approval(approval_id)
+
+    def list_approvals(self, status: Optional[str] = None) -> List[ApprovalRequestModel]:
+        return self.database.list_approvals(status=status)
+
+    def get_replay(self, replay_id: str) -> Dict[str, Any]:
+        replay = self.database.get_replay(replay_id)
+        if not replay:
+            raise ValueError("Replay not found")
+        return replay
+
+    def list_context_profiles(self) -> List[ContextProfile]:
+        rows = self.database.fetchall("SELECT payload_json FROM context_profiles ORDER BY updated_at DESC")
+        return [ContextProfile(**json.loads(row["payload_json"])) for row in rows]
+
+    def get_context_profile(self, context_profile_id: str) -> ContextProfile:
+        row = self.database.fetchone(
+            "SELECT payload_json FROM context_profiles WHERE context_profile_id = ?",
+            (context_profile_id,),
+        )
+        if not row:
+            raise ValueError("Context profile not found")
+        return ContextProfile(**json.loads(row["payload_json"]))
+
+    def list_prompt_templates(self) -> List[PromptTemplate]:
+        rows = self.database.fetchall("SELECT payload_json FROM prompt_templates ORDER BY updated_at DESC")
+        return [PromptTemplate(**json.loads(row["payload_json"])) for row in rows]
+
+    def get_prompt_template(self, prompt_template_id: str) -> PromptTemplate:
+        row = self.database.fetchone(
+            "SELECT payload_json FROM prompt_templates WHERE prompt_template_id = ?",
+            (prompt_template_id,),
+        )
+        if not row:
+            raise ValueError("Prompt template not found")
+        return PromptTemplate(**json.loads(row["payload_json"]))
+
+    def list_model_profiles(self) -> List[ModelProfile]:
+        rows = self.database.fetchall("SELECT payload_json FROM model_profiles ORDER BY updated_at DESC")
+        return [ModelProfile(**json.loads(row["payload_json"])) for row in rows]
+
+    def get_model_profile(self, model_profile_id: str) -> ModelProfile:
+        row = self.database.fetchone(
+            "SELECT payload_json FROM model_profiles WHERE model_profile_id = ?",
+            (model_profile_id,),
+        )
+        if not row:
+            raise ValueError("Model profile not found")
+        return ModelProfile(**json.loads(row["payload_json"]))
+
+    def list_events(self, session_id: Optional[str] = None, run_id: Optional[str] = None) -> List[EventEnvelope]:
+        return self.database.list_events(session_id=session_id, run_id=run_id, limit=500)
+
+    def get_model_provider_settings(self, model_profile_id: Optional[str] = None) -> ModelProviderSettings:
+        profile = self.get_model_profile(model_profile_id or self._default_policy().model_profile_id)
+        return self.model_registry.get_provider_settings(profile)
+
+    def _resolve_session_refs(
+        self,
+        constraint_set_id: Optional[str],
+        context_profile_id: Optional[str],
+        prompt_template_id: Optional[str],
+        model_profile_id: Optional[str],
+        workflow_template_id: Optional[str],
+    ) -> Dict[str, Any]:
+        policy = self._default_policy()
+        constraint = self.constraint_engine.get_document(constraint_set_id or policy.constraint_set_id)
+        context_profile = self.get_context_profile(context_profile_id or policy.context_profile_id)
+        prompt_template = self.get_prompt_template(prompt_template_id or policy.prompt_template_id)
+        model_profile = self.get_model_profile(model_profile_id or policy.model_profile_id)
+        workflow_template = self.get_workflow_template(workflow_template_id or self._default_workflow().workflow_id)
+        return {
+            "policy": policy,
+            "constraint": constraint,
+            "context_profile": context_profile,
+            "prompt_template": prompt_template,
+            "model_profile": model_profile,
+            "workflow_template": workflow_template,
+        }
+
+    def _default_policy(self) -> HarnessPolicy:
+        row = self.database.fetchone(
+            "SELECT payload_json FROM harness_policies WHERE status = 'published' ORDER BY updated_at DESC LIMIT 1"
+        )
+        if not row:
+            raise ValueError("No published harness policy available")
+        return HarnessPolicy(**json.loads(row["payload_json"]))
+
+    def list_workflow_templates(self) -> List[WorkflowTemplateVersion]:
+        rows = self.database.fetchall("SELECT payload_json FROM workflow_templates ORDER BY updated_at DESC")
+        return [WorkflowTemplateVersion(**json.loads(row["payload_json"])) for row in rows]
+
+    def get_workflow_template(self, workflow_id: str) -> WorkflowTemplateVersion:
+        row = self.database.fetchone(
+            "SELECT payload_json FROM workflow_templates WHERE workflow_id = ?",
+            (workflow_id,),
+        )
+        if not row:
+            raise ValueError("Workflow template not found")
+        return WorkflowTemplateVersion(**json.loads(row["payload_json"]))
+
+    def _default_workflow(self) -> WorkflowTemplateVersion:
+        row = self.database.fetchone(
+            "SELECT payload_json FROM workflow_templates WHERE status = 'published' ORDER BY updated_at DESC LIMIT 1"
+        )
+        if not row:
+            raise ValueError("No published workflow template available")
+        return WorkflowTemplateVersion(**json.loads(row["payload_json"]))
+
+    def _ephemeral_session(
+        self,
+        goal: str,
+        context: Dict[str, Any],
+        model_profile_id: Optional[str] = None,
+        profile_id: Optional[str] = None,
+    ) -> ResearchSession:
+        policy = self._default_policy()
+        workflow = self._default_workflow()
+        return ResearchSession(
+            session_id=new_id("session_preview"),
+            goal=goal,
+            status="configured",
+            active_policy_id=policy.policy_id,
+            workflow_template_id=workflow.workflow_id,
+            constraint_set_id=policy.constraint_set_id,
+            context_profile_id=profile_id or policy.context_profile_id,
+            prompt_template_id=policy.prompt_template_id,
+            model_profile_id=model_profile_id or policy.model_profile_id,
+            execution_mode="single_worker",
+            context=context,
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+
+    async def _execute_task_graph(
+        self,
+        run: ResearchRun,
+        session: ResearchSession,
+        context_summary: Optional[Dict[str, Any]] = None,
+        final_verdict: Optional[PolicyVerdict] = None,
+    ) -> ResearchRun:
+        task_graph = self._task_graph(session)
+        final_verdict = final_verdict or self.constraint_engine.final_verdict(run.execution_trace.policy_verdicts)
+        run.status = "running"
+        run.execution_trace.status = "running"
+        run.updated_at = utc_now()
+        session.status = "running"
+        session.updated_at = utc_now()
+        self._persist_run(run)
+        self._persist_session(session)
+
+        while True:
+            skipped_nodes = self.orchestrator.skip_unreachable_nodes(task_graph)
+            for skipped in skipped_nodes:
+                self.database.append_event(
+                    "task.skipped",
+                    {"node_id": skipped.node_id, "label": skipped.label, "kind": skipped.kind, "reason": skipped.metadata.get("skip_reason")},
+                    session_id=session.session_id,
+                    run_id=run.run_id,
+                )
+            ready_nodes = self.orchestrator.next_wave(task_graph)
+            if not ready_nodes:
+                break
+            idle_workers = [item for item in self.worker_service.list_workers() if item.state in {"idle", "registering"}]
+            if not idle_workers:
+                idle_workers = [self.worker_service.ensure_default_worker()]
+            chunk_size = max(1, len(idle_workers))
+            for offset in range(0, len(ready_nodes), chunk_size):
+                chunk = ready_nodes[offset : offset + chunk_size]
+                wave_id = new_id("wave")
+                self.database.append_event(
+                    "wave.started",
+                    {"wave_id": wave_id, "node_ids": [node.node_id for node in chunk], "size": len(chunk)},
+                    session_id=session.session_id,
+                    run_id=run.run_id,
+                )
+                allocated = []
+                for node in chunk:
+                    worker = self.worker_service.acquire_worker(run.run_id, node.node_id)
+                    allocated.append((node, worker))
+                    run.assigned_worker_id = worker.worker_id
+                    self.orchestrator.mark_node_status(
+                        task_graph,
+                        node.node_id,
+                        "running",
+                        {"worker_id": worker.worker_id, "started_at": utc_now()},
+                    )
+                    self.database.append_event(
+                        "worker.assigned",
+                        {"worker_id": worker.worker_id, "state": "executing", "run_id": run.run_id, "task_node_id": node.node_id},
+                        session_id=session.session_id,
+                        run_id=run.run_id,
+                    )
+                    self.database.append_event(
+                        "task.started",
+                        {"node_id": node.node_id, "label": node.label, "kind": node.kind, "role": node.role, "worker_id": worker.worker_id},
+                        session_id=session.session_id,
+                        run_id=run.run_id,
+                    )
+
+                for node, worker in allocated:
+                    outcome = await self._execute_task_node(
+                        node=node,
+                        run=run,
+                        session=session,
+                        context_summary=context_summary,
+                        final_verdict=final_verdict,
+                    )
+                    release_error = outcome.get("release_error")
+                    released = self.worker_service.release_worker(worker.worker_id, error=release_error)
+                    self.database.append_event(
+                        "worker.released",
+                        {
+                            "worker_id": worker.worker_id,
+                            "state": released.state,
+                            "task_node_id": node.node_id,
+                            "reason": outcome.get("reason"),
+                        },
+                        session_id=session.session_id,
+                        run_id=run.run_id,
+                    )
+                    if outcome["status"] == "awaiting_approval":
+                        self._persist_run(run)
+                        self._persist_session(session)
+                        self._persist_replay(run)
+                        return self.get_run(run.run_id)
+                    if outcome["status"] == "failed" and not self.orchestrator.has_node_kind(task_graph, "recovery"):
+                        self._persist_run(run)
+                        self._persist_session(session)
+                        self._persist_replay(run)
+                        return self.get_run(run.run_id)
+
+                self.database.append_event(
+                    "wave.completed",
+                    {"wave_id": wave_id, "node_ids": [node.node_id for node in chunk]},
+                    session_id=session.session_id,
+                    run_id=run.run_id,
+                )
+                run.updated_at = utc_now()
+                session.updated_at = utc_now()
+                self._persist_run(run)
+                self._persist_session(session)
+
+        if self.orchestrator.has_failed_nodes(task_graph):
+            if run.status != "failed":
+                self._mark_run_failed(run, session, "workflow_failed", "One or more task nodes failed.")
+        elif run.status not in {"completed", "awaiting_approval"}:
+            run.status = "completed"
+            run.execution_trace.status = "completed"
+            run.result = {
+                "summary": "Harness Lab run completed with a replayable trace.",
+                "output": run.result.get("output", {}),
+                "final_action": session.intent_declaration.suggested_action.model_dump(),
+                "completed_nodes": [node.node_id for node in task_graph.nodes if node.status == "completed"],
+            }
+            session.status = "completed"
+            self.database.append_event(
+                "run.completed",
+                {
+                    "summary": run.result["summary"],
+                    "tool_name": session.intent_declaration.suggested_action.tool_name,
+                    "completed_nodes": len([node for node in task_graph.nodes if node.status == "completed"]),
+                },
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+            run.execution_trace.updated_at = utc_now()
+            run.updated_at = utc_now()
+            session.updated_at = utc_now()
+            self._persist_run(run)
+            self._persist_session(session)
+            self._persist_replay(run)
+        return self.get_run(run.run_id)
+
+    async def _execute_task_node(
+        self,
+        node: TaskNode,
+        run: ResearchRun,
+        session: ResearchSession,
+        context_summary: Optional[Dict[str, Any]],
+        final_verdict: PolicyVerdict,
+    ) -> Dict[str, Any]:
+        if node.kind == "planning":
+            self.orchestrator.mark_node_status(
+                session.task_graph,
+                node.node_id,
+                "completed",
+                {
+                    "completed_at": utc_now(),
+                    "summary": session.intent_declaration.intent,
+                    "action": session.intent_declaration.suggested_action.tool_name,
+                },
+            )
+            self.database.append_event(
+                "task.completed",
+                {"node_id": node.node_id, "label": node.label, "summary": session.intent_declaration.intent},
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+            return {"status": "completed"}
+
+        if node.kind == "context":
+            self.orchestrator.mark_node_status(
+                session.task_graph,
+                node.node_id,
+                "completed",
+                {"completed_at": utc_now(), "selection_summary": context_summary or {}},
+            )
+            self.database.append_event(
+                "task.completed",
+                {"node_id": node.node_id, "label": node.label, "selection_summary": context_summary or {}},
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+            return {"status": "completed"}
+
+        if node.kind == "prompt":
+            self.orchestrator.mark_node_status(
+                session.task_graph,
+                node.node_id,
+                "completed",
+                {
+                    "completed_at": utc_now(),
+                    "prompt_frame_id": run.prompt_frame.prompt_frame_id if run.prompt_frame else None,
+                    "total_token_estimate": run.prompt_frame.total_token_estimate if run.prompt_frame else 0,
+                },
+            )
+            self.database.append_event(
+                "task.completed",
+                {
+                    "node_id": node.node_id,
+                    "label": node.label,
+                    "prompt_frame_id": run.prompt_frame.prompt_frame_id if run.prompt_frame else None,
+                    "total_token_estimate": run.prompt_frame.total_token_estimate if run.prompt_frame else 0,
+                },
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+            return {"status": "completed"}
+
+        if node.kind == "policy":
+            if final_verdict.decision == "deny":
+                self.orchestrator.mark_node_status(
+                    session.task_graph,
+                    node.node_id,
+                    "failed",
+                    {"completed_at": utc_now(), "reason": final_verdict.reason},
+                )
+                self.database.append_event(
+                    "task.failed",
+                    {"node_id": node.node_id, "label": node.label, "reason": final_verdict.reason},
+                    session_id=session.session_id,
+                    run_id=run.run_id,
+                )
+                self._mark_run_failed(run, session, "policy_denied", final_verdict.reason)
+                return {"status": "failed", "reason": final_verdict.reason, "release_error": final_verdict.reason}
+            if final_verdict.decision == "approval_required":
+                approvals = self.database.list_approvals(run_id=run.run_id)
+                approval = approvals[0] if approvals else self.database.create_approval(
+                    run_id=run.run_id,
+                    verdict_id=final_verdict.verdict_id,
+                    subject=final_verdict.subject,
+                    summary=final_verdict.reason,
+                    payload=session.intent_declaration.suggested_action.payload,
+                )
+                self.orchestrator.mark_node_status(
+                    session.task_graph,
+                    node.node_id,
+                    "blocked",
+                    {"completed_at": utc_now(), "approval_id": approval.approval_id, "reason": approval.summary},
+                )
+                run.status = "awaiting_approval"
+                run.result = {
+                    "summary": "Run is waiting for operator approval.",
+                    "approval_id": approval.approval_id,
+                    "final_verdict": final_verdict.model_dump(),
+                }
+                run.execution_trace.status = "awaiting_approval"
+                run.updated_at = utc_now()
+                session.status = "awaiting_approval"
+                session.updated_at = utc_now()
+                self.database.append_event(
+                    "approval.requested",
+                    {"approval_id": approval.approval_id, "subject": approval.subject, "summary": approval.summary},
+                    session_id=session.session_id,
+                    run_id=run.run_id,
+                )
+                self.database.append_event(
+                    "task.blocked",
+                    {"node_id": node.node_id, "label": node.label, "approval_id": approval.approval_id},
+                    session_id=session.session_id,
+                    run_id=run.run_id,
+                )
+                return {"status": "awaiting_approval", "reason": approval.summary}
+            self.orchestrator.mark_node_status(
+                session.task_graph,
+                node.node_id,
+                "completed",
+                {"completed_at": utc_now(), "decision": final_verdict.decision, "matched_rule": final_verdict.matched_rule},
+            )
+            self.database.append_event(
+                "task.completed",
+                {"node_id": node.node_id, "label": node.label, "decision": final_verdict.decision},
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+            return {"status": "completed"}
+
+        if node.kind == "execution":
+            result = await self._execute_action(run, session)
+            self.orchestrator.mark_node_status(
+                session.task_graph,
+                node.node_id,
+                "completed" if result.ok else "failed",
+                {
+                    "completed_at": utc_now(),
+                    "tool_name": session.intent_declaration.suggested_action.tool_name,
+                    "ok": result.ok,
+                    "error": result.error,
+                },
+            )
+            if result.ok:
+                run.result = {
+                    "summary": "Execution finished; awaiting review and learning stages.",
+                    "output": result.output,
+                    "final_action": session.intent_declaration.suggested_action.model_dump(),
+                }
+                self.database.append_event(
+                    "task.completed",
+                    {"node_id": node.node_id, "label": node.label, "tool_name": session.intent_declaration.suggested_action.tool_name},
+                    session_id=session.session_id,
+                    run_id=run.run_id,
+                )
+                return {"status": "completed"}
+            recovery = RecoveryEvent(
+                recovery_id=new_id("recovery"),
+                kind="tool_failure",
+                summary=result.error or "Unknown tool failure",
+                created_at=utc_now(),
+            )
+            run.execution_trace.recovery_events.append(recovery)
+            run.execution_trace.status = "recovering" if self.orchestrator.has_node_kind(session.task_graph, "recovery") else "failed"
+            run.status = "recovering" if self.orchestrator.has_node_kind(session.task_graph, "recovery") else "failed"
+            run.result = {"summary": "Run failed during execution.", "reason": recovery.summary}
+            session.status = "running" if self.orchestrator.has_node_kind(session.task_graph, "recovery") else "failed"
+            self.database.append_event(
+                "task.failed",
+                {"node_id": node.node_id, "label": node.label, "reason": recovery.summary},
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+            if not self.orchestrator.has_node_kind(session.task_graph, "recovery"):
+                self.database.append_event(
+                    "run.failed",
+                    {"summary": run.result["summary"], "reason": recovery.summary},
+                    session_id=session.session_id,
+                    run_id=run.run_id,
+                )
+            return {"status": "failed", "reason": recovery.summary, "release_error": recovery.summary}
+
+        if node.kind == "recovery":
+            artifact = self.database.write_artifact_text(
+                run.run_id,
+                "recovery_packet",
+                "recovery_packet.json",
+                json.dumps(
+                    {
+                        "run_id": run.run_id,
+                        "session_id": session.session_id,
+                        "recovery_events": [item.model_dump() for item in run.execution_trace.recovery_events],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                {"node_id": node.node_id},
+            )
+            run.execution_trace.artifacts.append(artifact)
+            self.orchestrator.mark_node_status(
+                session.task_graph,
+                node.node_id,
+                "completed",
+                {"completed_at": utc_now(), "artifact_id": artifact.artifact_id},
+            )
+            self.database.append_event(
+                "task.completed",
+                {"node_id": node.node_id, "label": node.label, "artifact_id": artifact.artifact_id},
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+            return {"status": "completed"}
+
+        if node.kind == "review":
+            review_summary = {
+                "tool_calls": len(run.execution_trace.tool_calls),
+                "recovery_events": len(run.execution_trace.recovery_events),
+                "policy_verdicts": len(run.execution_trace.policy_verdicts),
+            }
+            self.orchestrator.mark_node_status(
+                session.task_graph,
+                node.node_id,
+                "completed",
+                {"completed_at": utc_now(), "review": review_summary},
+            )
+            self.database.append_event(
+                "task.completed",
+                {"node_id": node.node_id, "label": node.label, "review": review_summary},
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+            return {"status": "completed"}
+
+        if node.kind == "learning":
+            artifact = self.database.write_artifact_text(
+                run.run_id,
+                "learning_summary",
+                "run_summary.json",
+                json.dumps(
+                    {
+                        "run_id": run.run_id,
+                        "session_id": session.session_id,
+                        "goal": session.goal,
+                        "result": run.result,
+                        "tool_calls": [item.model_dump() for item in run.execution_trace.tool_calls],
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                {"node_id": node.node_id},
+            )
+            run.execution_trace.artifacts.append(artifact)
+            self.orchestrator.mark_node_status(
+                session.task_graph,
+                node.node_id,
+                "completed",
+                {"completed_at": utc_now(), "artifact_id": artifact.artifact_id},
+            )
+            self.database.append_event(
+                "task.completed",
+                {"node_id": node.node_id, "label": node.label, "artifact_id": artifact.artifact_id},
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+            return {"status": "completed"}
+
+        self.orchestrator.mark_node_status(session.task_graph, node.node_id, "completed", {"completed_at": utc_now()})
+        self.database.append_event(
+            "task.completed",
+            {"node_id": node.node_id, "label": node.label, "kind": node.kind},
+            session_id=session.session_id,
+            run_id=run.run_id,
+        )
+        return {"status": "completed"}
+
+    async def _execute_action(self, run: ResearchRun, session: ResearchSession):
+        if session.intent_declaration.suggested_action.tool_name == "model_reflection":
+            model_profile = self.get_model_profile(session.model_profile_id)
+            reflection, model_call = self.model_registry.reflect_with_trace(
+                prompt=str(session.intent_declaration.suggested_action.payload.get("prompt", session.goal)),
+                profile=model_profile,
+                extra={"session_id": session.session_id, "run_id": run.run_id},
+            )
+            run.execution_trace.model_calls.append(model_call)
+            self.database.append_event(
+                "model.reflection_called",
+                model_call.model_dump(),
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+            result = self.tool_gateway.model_reflection_result(reflection)
+        else:
+            result = await self.tool_gateway.execute(run.run_id, session.intent_declaration.suggested_action)
+        call = ToolCallRecord(
+            tool_name=session.intent_declaration.suggested_action.tool_name,
+            payload=session.intent_declaration.suggested_action.payload,
+            ok=result.ok,
+            output=result.output,
+            error=result.error,
+            created_at=utc_now(),
+        )
+        run.execution_trace.tool_calls.append(call)
+        self.database.append_event(
+            "tool.executed",
+            {"tool_name": call.tool_name, "ok": call.ok, "error": call.error},
+            session_id=session.session_id,
+            run_id=run.run_id,
+        )
+        return result
+
+    @staticmethod
+    def _task_graph(session: ResearchSession):
+        if not session.task_graph:
+            raise ValueError("Session has no task graph")
+        return session.task_graph
+
+    def _mark_run_failed(self, run: ResearchRun, session: ResearchSession, kind: str, reason: str) -> None:
+        run.status = "failed"
+        run.execution_trace.status = "failed"
+        run.execution_trace.recovery_events.append(
+            RecoveryEvent(recovery_id=new_id("recovery"), kind=kind, summary=reason, created_at=utc_now())
+        )
+        run.result = {"summary": "Run terminated before execution.", "reason": reason}
+        run.execution_trace.updated_at = utc_now()
+        run.updated_at = utc_now()
+        session.status = "failed"
+        session.updated_at = utc_now()
+        if run.assigned_worker_id:
+            self.worker_service.release_worker(run.assigned_worker_id, error=reason)
+            self.database.append_event(
+                "worker.released",
+                {"worker_id": run.assigned_worker_id, "state": "unhealthy", "reason": reason},
+                session_id=session.session_id,
+                run_id=run.run_id,
+            )
+        self._persist_run(run)
+        self._persist_session(session)
+        self.database.append_event("run.failed", {"summary": run.result["summary"], "reason": reason}, session_id=session.session_id, run_id=run.run_id)
+        self._persist_replay(run)
+
+    def _persist_replay(self, run: ResearchRun) -> None:
+        replay_payload = {
+            "run": run.model_dump(),
+            "session": self.get_session(run.session_id).model_dump(),
+            "events": [event.model_dump() for event in self.database.list_events(run_id=run.run_id, limit=500)],
+            "approvals": [approval.model_dump() for approval in self.database.list_approvals(run_id=run.run_id)],
+            "artifacts": [artifact.model_dump() for artifact in self.database.list_artifacts(run_id=run.run_id)],
+        }
+        self.database.upsert_replay(run.run_id, run.run_id, replay_payload)
+
+    def _persist_session(self, session: ResearchSession) -> None:
+        self.database.upsert_row(
+            "sessions",
+            {
+                "session_id": session.session_id,
+                "goal": session.goal,
+                "status": session.status,
+                "active_policy_id": session.active_policy_id,
+                "workflow_template_id": session.workflow_template_id,
+                "constraint_set_id": session.constraint_set_id,
+                "context_profile_id": session.context_profile_id,
+                "prompt_template_id": session.prompt_template_id,
+                "model_profile_id": session.model_profile_id,
+                "execution_mode": session.execution_mode,
+                "payload_json": json.dumps(session.model_dump(), ensure_ascii=False),
+                "created_at": session.created_at,
+                "updated_at": session.updated_at,
+            },
+            "session_id",
+        )
+
+    def _persist_run(self, run: ResearchRun) -> None:
+        self.database.upsert_row(
+            "runs",
+            {
+                "run_id": run.run_id,
+                "session_id": run.session_id,
+                "status": run.status,
+                "payload_json": json.dumps(run.model_dump(), ensure_ascii=False),
+                "prompt_frame_id": run.prompt_frame.prompt_frame_id if run.prompt_frame else None,
+                "created_at": run.created_at,
+                "updated_at": run.updated_at,
+            },
+            "run_id",
+        )

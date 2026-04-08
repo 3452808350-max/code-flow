@@ -1,19 +1,36 @@
-from fastapi import FastAPI, HTTPException
+from pathlib import Path
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
-import uvicorn
+from dotenv import load_dotenv
 
-from backend.app.core.workflow_engine import WorkflowEngine
-from backend.app.core.intent_analyzer import IntentAnalyzer
-from backend.app.core.task_planner import TaskPlanner
-from backend.app.core.vector_db import VectorDB
-from backend.app.core.reasoning_model import ReasoningModel
-from backend.app.core.preference_model import PreferenceModel
+from backend.app.harness_lab.control_plane.approvals import router as approvals_router
+from backend.app.harness_lab.control_plane.candidates import router as candidates_router
+from backend.app.harness_lab.control_plane.constraints import router as constraints_router
+from backend.app.harness_lab.control_plane.context import router as context_router
+from backend.app.harness_lab.control_plane.experiments import router as experiments_router
+from backend.app.harness_lab.control_plane.evals import router as evals_router
+from backend.app.harness_lab.control_plane.failure_clusters import router as failure_clusters_router
+from backend.app.harness_lab.control_plane.intent import router as intent_router
+from backend.app.harness_lab.control_plane.policies import router as policies_router
+from backend.app.harness_lab.control_plane.prompts import router as prompts_router
+from backend.app.harness_lab.control_plane.replays import router as replays_router
+from backend.app.harness_lab.control_plane.runs import router as runs_router
+from backend.app.harness_lab.control_plane.sessions import router as sessions_router
+from backend.app.harness_lab.control_plane.system import router as system_router
+from backend.app.harness_lab.control_plane.workers import router as workers_router
+from backend.app.harness_lab.control_plane.workflows import router as workflows_router
 
-app = FastAPI(title="AI Workflow Platform", version="1.0.0")
 
-# CORS middleware
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
+
+app = FastAPI(
+    title="Harness Lab",
+    version="3.0.0",
+    description="Research-first Harness Lab with layered context, natural-language constraints, prompt frames, policy verdicts, and replayable execution traces.",
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,56 +39,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize core components
-workflow_engine = WorkflowEngine()
-intent_analyzer = IntentAnalyzer()
-task_planner = TaskPlanner()
-vector_db = VectorDB()
-reasoning_model = ReasoningModel()
-preference_model = PreferenceModel()
+app.include_router(sessions_router)
+app.include_router(intent_router)
+app.include_router(context_router)
+app.include_router(prompts_router)
+app.include_router(constraints_router)
+app.include_router(approvals_router)
+app.include_router(runs_router)
+app.include_router(replays_router)
+app.include_router(policies_router)
+app.include_router(experiments_router)
+app.include_router(candidates_router)
+app.include_router(evals_router)
+app.include_router(workflows_router)
+app.include_router(failure_clusters_router)
+app.include_router(workers_router)
+app.include_router(system_router)
 
-class WorkflowRequest(BaseModel):
-    query: str
-    user_id: Optional[str] = "default"
 
-class FeedbackRequest(BaseModel):
-    workflow_id: str
-    rating: int
-    feedback: Optional[str] = None
+@app.get("/")
+async def root():
+    return {
+        "success": True,
+        "data": {
+            "name": "Harness Lab",
+            "mode": "research_platform",
+            "docs": "/docs",
+        },
+    }
 
-@app.post("/api/workflow/execute")
-async def execute_workflow(request: WorkflowRequest):
-    """执行AI工作流"""
-    try:
-        result = await workflow_engine.execute(
-            query=request.query,
-            user_id=request.user_id,
-            intent_analyzer=intent_analyzer,
-            task_planner=task_planner,
-            vector_db=vector_db,
-            reasoning_model=reasoning_model
-        )
-        return {"success": True, "data": result}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/feedback")
-async def submit_feedback(request: FeedbackRequest):
-    """提交用户反馈"""
-    try:
-        await preference_model.update_preferences(
-            workflow_id=request.workflow_id,
-            rating=request.rating,
-            feedback=request.feedback
-        )
-        return {"success": True, "message": "反馈已提交"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def main() -> None:
+    import uvicorn
 
-@app.get("/api/health")
-async def health_check():
-    """健康检查"""
-    return {"status": "healthy", "message": "AI Workflow Platform is running"}
+    uvicorn.run(app, host="0.0.0.0", port=4600)
+
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    main()
