@@ -2,12 +2,18 @@
 
 This module centralizes lease management, worker registry, and dispatch logic.
 
-Current Status:
-    - WorkerRegistry: ✅ Migrated from workers/service.py
-    - Dispatcher: 🔄 Partial (queue logic migrated, matching pending)
-    - LeaseManager: ✅ Protocol-based (lease_manager.py)
-    - Protocols: ✅ Defined (protocols.py)
-    - Adapters: ✅ Implemented (adapters.py)
+Architecture:
+    - WorkerRegistry: Worker lifecycle management (register, heartbeat, drain, resume)
+    - Dispatcher: Task dispatch logic (queue shard selection, worker matching, dispatch creation)
+    - LeaseManager: Lease lifecycle management (poll, heartbeat, complete, fail, release)
+    - Protocols: Clean interfaces between Runtime and Fleet layers
+    - Adapters: RuntimeService implementations of fleet protocols
+
+Reliability Semantics:
+    - Draining workers don't receive new dispatches
+    - Stale lease reclaim requeues tasks automatically
+    - Duplicate/late callbacks record ignored events without state changes
+    - Restart recovery via rebuild_dispatch_state()
 """
 
 from .worker_registry import WorkerRegistry
