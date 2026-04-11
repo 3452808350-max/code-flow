@@ -553,10 +553,16 @@ class Dispatcher:
 class InMemoryDispatcher(Dispatcher):
     """In-memory dispatcher for testing without Redis."""
     
-    def __init__(self, worker_registry, database: PlatformStore, lease_timeout_seconds: int = 30) -> None:
+    def __init__(
+        self,
+        worker_registry,
+        database: PlatformStore,
+        lease_timeout_seconds: int = 30,
+        existing_queue=None,
+    ) -> None:
         from ..dispatch_queue import InMemoryDispatchQueue
         super().__init__(
-            queue=InMemoryDispatchQueue(),
+            queue=existing_queue if existing_queue is not None else InMemoryDispatchQueue(),
             worker_registry=worker_registry,
             database=database,
             lease_timeout_seconds=lease_timeout_seconds,

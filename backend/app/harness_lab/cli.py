@@ -20,6 +20,7 @@ from backend.app.harness_lab.types import (  # noqa: E402
     SessionRequest,
     WorkerRegisterRequest,
 )
+from backend.app.harness_lab.fleet.worker_registry import WorkerRegistry  # noqa: E402
 from backend.app.harness_lab.workers.runtime_client import WorkerExecutionLoop, WorkerRuntimeClient  # noqa: E402
 
 
@@ -336,7 +337,7 @@ def main() -> None:
     if args.command == "workers":
         if args.register:
             sandbox_status = harness_lab_services.sandbox.status()
-            worker = harness_lab_services.workers.register_worker(
+            worker = harness_lab_services.runtime.worker_registry.register_worker(
                 WorkerRegisterRequest(
                     label=args.label,
                     capabilities=args.capability,
@@ -348,7 +349,7 @@ def main() -> None:
             )
             _emit(worker.model_dump(), args.output_format)
             return
-        _emit([item.model_dump() for item in harness_lab_services.workers.list_workers()], args.output_format)
+        _emit([item.model_dump() for item in harness_lab_services.runtime.worker_registry.list_workers()], args.output_format)
         return
 
     if args.command == "sandbox" and args.sandbox_command == "probe":
@@ -369,7 +370,7 @@ def main() -> None:
                 )
                 _emit(worker.model_dump(), args.output_format)
                 return
-            worker = harness_lab_services.workers.register_worker(
+            worker = harness_lab_services.runtime.worker_registry.register_worker(
                 WorkerRegisterRequest(
                     worker_id=args.worker_id or None,
                     label=args.label,
@@ -397,11 +398,11 @@ def main() -> None:
                 recent_lease_ids = {lease.lease_id for lease in recent_leases}
                 _emit(
                     {
-                        "worker": harness_lab_services.workers.get_worker(args.worker_id).model_dump(),
+                        "worker": harness_lab_services.runtime.worker_registry.get_worker(args.worker_id).model_dump(),
                         "health_summary": harness_lab_services.runtime.get_worker_health_summary(args.worker_id).model_dump(),
                         "sandbox": {
-                            "backend": harness_lab_services.workers.get_worker(args.worker_id).sandbox_backend,
-                            "ready": harness_lab_services.workers.get_worker(args.worker_id).sandbox_ready,
+                            "backend": harness_lab_services.runtime.worker_registry.get_worker(args.worker_id).sandbox_backend,
+                            "ready": harness_lab_services.runtime.worker_registry.get_worker(args.worker_id).sandbox_ready,
                         },
                         "recent_leases": [lease.model_dump() for lease in recent_leases],
                         "recent_events": [
@@ -414,7 +415,7 @@ def main() -> None:
                     args.output_format,
                 )
                 return
-            _emit([item.model_dump() for item in harness_lab_services.workers.list_workers()], args.output_format)
+            _emit([item.model_dump() for item in harness_lab_services.runtime.worker_registry.list_workers()], args.output_format)
             return
 
         if args.worker_command == "drain":
@@ -423,7 +424,7 @@ def main() -> None:
                 worker = client.drain_worker(args.worker_id, args.reason or None)
                 _emit(worker.model_dump(), args.output_format)
                 return
-            worker = harness_lab_services.workers.drain_worker(args.worker_id, args.reason or None)
+            worker = harness_lab_services.runtime.worker_registry.drain_worker(args.worker_id, args.reason or None)
             _emit(worker.model_dump(), args.output_format)
             return
 
@@ -433,7 +434,7 @@ def main() -> None:
                 worker = client.resume_worker(args.worker_id)
                 _emit(worker.model_dump(), args.output_format)
                 return
-            worker = harness_lab_services.workers.resume_worker(args.worker_id)
+            worker = harness_lab_services.runtime.worker_registry.resume_worker(args.worker_id)
             _emit(worker.model_dump(), args.output_format)
             return
 

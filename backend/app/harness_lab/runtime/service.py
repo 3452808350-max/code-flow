@@ -95,13 +95,18 @@ class RuntimeService:
         self.local_worker_adapter = LocalWorkerAdapter(self)
         
         # Create Dispatcher first (owns dispatch queue and matching logic)
+        # Always pass the same queue instance to ensure consistency
         if hasattr(dispatch_queue, '__class__') and 'InMemory' in dispatch_queue.__class__.__name__:
+            # For InMemoryDispatchQueue, create dispatcher with the existing queue
+            from ..fleet.dispatcher import InMemoryDispatcher
             self.dispatcher = InMemoryDispatcher(
                 worker_registry=self.worker_registry,
                 database=database,
                 lease_timeout_seconds=self.lease_timeout_seconds,
+                existing_queue=dispatch_queue,  # Pass the same queue instance
             )
         else:
+            from ..fleet.dispatcher import Dispatcher
             self.dispatcher = Dispatcher(
                 queue=dispatch_queue,
                 worker_registry=self.worker_registry,
