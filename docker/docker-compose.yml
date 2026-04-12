@@ -25,7 +25,6 @@ services:
 
   harness-lab-minio:
     image: docker.1ms.run/minio/minio:latest
-    profiles: ["artifact-store"]
     environment:
       MINIO_ROOT_USER: ${HARNESS_AWS_ACCESS_KEY_ID:-minioadmin}
       MINIO_ROOT_PASSWORD: ${HARNESS_AWS_SECRET_ACCESS_KEY:-minioadmin}
@@ -36,6 +35,11 @@ services:
     volumes:
       - minio-data:/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     networks:
       - agent-os-network
 
@@ -71,6 +75,8 @@ services:
         condition: service_started
       harness-lab-redis:
         condition: service_started
+      harness-lab-minio:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python3", "health-check.py"]
       interval: 30s

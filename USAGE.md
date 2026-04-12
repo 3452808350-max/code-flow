@@ -2,10 +2,55 @@
 
 ## Start the platform
 
+### Infrastructure (Postgres, Redis, MinIO)
+```bash
+docker compose -f docker/docker-compose.yml up -d
+```
+
 ### Backend
 ```bash
+# Copy environment config
+cp .env.example .env
+
+# Edit .env to configure artifact backend:
+# - HARNESS_ARTIFACT_BACKEND=local (default, filesystem storage)
+# - HARNESS_ARTIFACT_BACKEND=s3 (S3-compatible, e.g., MinIO)
+
 python3 -m uvicorn backend.app.main:app --reload --port 4600
 ```
+
+### Artifact Backend Configuration
+
+**Local filesystem (default for development):**
+```bash
+HARNESS_ARTIFACT_BACKEND=local
+HARNESS_ARTIFACT_ROOT=backend/data/harness_lab/artifacts
+```
+
+**S3-compatible (MinIO for production-like testing):**
+```bash
+HARNESS_ARTIFACT_BACKEND=s3
+HARNESS_ARTIFACT_BUCKET=harness-lab-artifacts
+HARNESS_ARTIFACT_PREFIX=harness-lab
+HARNESS_AWS_ENDPOINT_URL=http://localhost:9000
+HARNESS_AWS_ACCESS_KEY_ID=minioadmin
+HARNESS_AWS_SECRET_ACCESS_KEY=minioadmin
+```
+
+**AWS S3 (production):**
+```bash
+HARNESS_ARTIFACT_BACKEND=s3
+HARNESS_ARTIFACT_BUCKET=my-harness-bucket
+HARNESS_ARTIFACT_PREFIX=artifacts
+HARNESS_AWS_REGION=us-east-1
+HARNESS_AWS_ACCESS_KEY_ID=your-access-key
+HARNESS_AWS_SECRET_ACCESS_KEY=your-secret-key
+# Leave endpoint empty for AWS
+```
+
+Check artifact backend status:
+- `GET /api/health` - shows `artifact_backend`, `artifact_ready`, `artifact_last_error`
+- `GET /api/settings/catalog` - shows full `artifact_store` status
 
 ### Frontend
 ```bash

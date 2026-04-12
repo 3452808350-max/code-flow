@@ -283,18 +283,61 @@ class S3CompatibleArtifactStore(ArtifactStore):
             return f"{self.endpoint_url.rstrip('/')}/{self.bucket}/{artifact.storage_key}"
         return f"s3://{self.bucket}/{artifact.storage_key}"
 
+    def _ensure_bucket(self) -> bool:
+        """Ensure the bucket exists, creating it if necessary.
+        
+        Returns True if bucket exists or was created successfully.
+        """
+        client = self._build_client()
+        if client is None:
+            return False
+        try:
+            client.head_bucket(Bucket=self.bucket)
+            return True
+        except client.exceptions.ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            if error_code == '404':
+                # Bucket doesn't exist, try to create it
+                try:
+                    client.create_bucket(Bucket=self.bucket)
+                    return True
+                except Exception as create_exc:  # noqa: BLE001
+                    self._last_error = f"Failed to create bucket: {str(create_exc)}"
+                    return False
+            else:
+                self._last_error = str(e)
+                return False
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = str(exc)
+            return False
+
     def status(self) -> ArtifactStoreStatus:
+        """Return readiness for the configured artifact backend.
+        
+        Performs real connectivity check against the S3 endpoint.
+        """
         client = self._build_client()
         ready = False
         last_error = self._last_error
-        if client is not None:
+        
+        if client is None:
+            last_error = last_error or "S3 client could not be built (boto3 missing or misconfigured)"
+        else:
             try:
-                if hasattr(client, "head_bucket"):
-                    client.head_bucket(Bucket=self.bucket)
-                ready = True
-                last_error = None
+                # First check if we can reach the endpoint
+                client.list_buckets()
+                
+                # Then check if the bucket exists (create if needed)
+                if self._ensure_bucket():
+                    ready = True
+                    last_error = None
+                else:
+                    last_error = last_error or f"Bucket '{self.bucket}' not accessible"
+                    
             except Exception as exc:  # noqa: BLE001
                 last_error = str(exc)
+                self._last_error = last_error
+                
         return ArtifactStoreStatus(
             backend=self.backend_name,
             ready=ready,

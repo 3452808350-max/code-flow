@@ -21,7 +21,7 @@
 - natural-language constraints with deny-before-allow verdicts
 - fixed prompt frame ordering
 - replayable execution traces, approval chain, and artifact indexing
-- switchable artifact backend with local and S3-compatible storage support
+- switchable artifact backend with local filesystem and S3-compatible object storage (MinIO for dev, AWS S3 for production)
 - lease-driven remote-worker protocol with mission / attempt / lease visibility
 - Docker-backed sandbox boundary for high-risk tool execution
 - role-aware mission orchestration with handoff packets, review verdicts, and mission-phase visibility
@@ -52,7 +52,12 @@
 
 ### Infra
 ```bash
+# Start all infrastructure services (Postgres, Redis, MinIO)
+docker compose -f docker/docker-compose.yml up -d
+
+# Or start individual services
 docker compose -f docker/docker-compose.yml up -d harness-lab-postgres harness-lab-redis
+docker compose -f docker/docker-compose.yml up -d harness-lab-minio  # For S3 artifact backend
 ```
 
 ### Backend
@@ -86,4 +91,4 @@ Open:
 - custom natural-language constraints still resolve through heuristic policy behavior instead of rich semantic rule compilation
 - multi-agent orchestration is now role-aware and replayable, but it is still workflow-bounded rather than a fully autonomous swarm
 - self-improvement now diagnoses multi-agent traces and auto-evaluates candidates, but it still only optimizes policy/workflow versions rather than platform source code
-- artifact storage now has a formal backend abstraction, but control-plane artifact reads are still proxy-based rather than presigned/object-native delivery
+- artifact storage supports both local filesystem and S3-compatible backends with real-time health checks; control plane proxies artifact reads consistently across backends
