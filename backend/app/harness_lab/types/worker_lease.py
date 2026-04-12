@@ -7,6 +7,18 @@ from pydantic import BaseModel, Field
 from .base import AgentRole, WorkerState, MissionStatus, AttemptStatus, LeaseStatus
 
 
+class WorkerSandboxStats(BaseModel):
+    """Sandbox execution statistics for a worker."""
+    total_executions: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    timeout_count: int = 0
+    policy_denied_count: int = 0
+    approval_blocked_count: int = 0
+    last_failure_at: Optional[str] = None
+    last_failure_reason: Optional[str] = None
+
+
 class WorkerSnapshot(BaseModel):
     """Snapshot of worker state."""
     worker_id: str
@@ -29,6 +41,8 @@ class WorkerSnapshot(BaseModel):
     current_lease_id: Optional[str] = None
     sandbox_backend: Optional[str] = None
     sandbox_ready: bool = False
+    sandbox_hardened_ready: bool = False
+    sandbox_stats: Optional[WorkerSandboxStats] = None
     last_error: Optional[str] = None
     created_at: str
     updated_at: str
@@ -221,6 +235,7 @@ class WorkerRegisterRequest(BaseModel):
     execution_mode: str = "embedded"
     sandbox_backend: Optional[str] = None
     sandbox_ready: bool = False
+    sandbox_hardened_ready: bool = False
     version: str = "v1"
 
 

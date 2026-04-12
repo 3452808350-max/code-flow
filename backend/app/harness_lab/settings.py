@@ -26,6 +26,10 @@ class HarnessLabSettings(BaseModel):
     sandbox_image: str = Field("harness-lab/sandbox:local", alias="HARNESS_SANDBOX_IMAGE")
     sandbox_timeout_seconds: int = Field(20, alias="HARNESS_SANDBOX_TIMEOUT_SECONDS")
     docker_bin: str = Field("docker", alias="HARNESS_DOCKER_BIN")
+    # Hardened sandbox settings
+    sandbox_rootless_user: str = Field("1000:1000", alias="HARNESS_SANDBOX_ROOTLESS_USER")
+    sandbox_no_new_privileges: bool = Field(True, alias="HARNESS_SANDBOX_NO_NEW_PRIVILEGES")
+    sandbox_cap_drop_all: bool = Field(True, alias="HARNESS_SANDBOX_CAP_DROP_ALL")
 
     @classmethod
     def from_env(cls) -> "HarnessLabSettings":
@@ -51,6 +55,9 @@ class HarnessLabSettings(BaseModel):
             "HARNESS_SANDBOX_IMAGE": os.getenv("HARNESS_SANDBOX_IMAGE", "harness-lab/sandbox:local"),
             "HARNESS_SANDBOX_TIMEOUT_SECONDS": os.getenv("HARNESS_SANDBOX_TIMEOUT_SECONDS", "20"),
             "HARNESS_DOCKER_BIN": os.getenv("HARNESS_DOCKER_BIN", "docker"),
+            "HARNESS_SANDBOX_ROOTLESS_USER": os.getenv("HARNESS_SANDBOX_ROOTLESS_USER", "1000:1000"),
+            "HARNESS_SANDBOX_NO_NEW_PRIVILEGES": os.getenv("HARNESS_SANDBOX_NO_NEW_PRIVILEGES", "true"),
+            "HARNESS_SANDBOX_CAP_DROP_ALL": os.getenv("HARNESS_SANDBOX_CAP_DROP_ALL", "true"),
         }
         settings = cls.model_validate(env)
         settings.validate_runtime_backends()

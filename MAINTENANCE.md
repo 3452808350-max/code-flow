@@ -21,14 +21,48 @@
 
 ### ADR-002: Docker 沙箱作为高风险工具边界
 
-**状态**: ✅ 已完成  
-**决策**: shell/git/http_fetch/write_file 等高风险操作在 Docker 容器内执行  
+**状态**: ✅ 已完成（已硬化）  
+**决策**: shell/git/http_fetch/write_file 等高风险操作在 hardened Docker 容器内执行  
+**硬化配置**:
+- `--security-opt=no-new-privileges:true` - 禁止特权提升
+- `--cap-drop=ALL` + 最小 capability 白名单 - 最小权限原则
+- `--user=1000:1000` - rootless 运行
+- 读写挂载分离 (`/workspace` 只读, `/sandbox-input` 输入, `/tmp` tmpfs)
+- 网络策略语义化 (`none`/`restricted`/`default`)
+
 **原因**:
 - 单主机执行有安全风险
 - Docker 提供可复现的执行环境
+- 硬化配置提供生产级隔离边界
 
 **仍未解决的边界**: 
-仍是 Docker 单机边界，不是 microVM/多租户隔离。
+仍是 Docker 单机边界，已准备好抽象到 microVM（Firecracker/gVisor），不是多租户隔离。
+
+---
+
+### ADR-004: 副作用分类与审计追踪
+
+**状态**: ✅ 已完成  
+**决策**: 所有工具执行按副作用类型分类，sandbox 执行生成标准化证据链  
+**副作用分类**:
+- `host_local_read` - 主机本地读取（低危）
+- `sandboxed_read` - 沙箱内读取（git status/diff）
+- `sandboxed_mutation` - 沙箱内变更（write_file，需审批）
+- `denied_before_sandbox` - 策略拒绝（未进入沙箱）
+- `approval_blocked` - 等待审批
+
+**证据链标准**:
+- `sandbox_trace` - 完整执行追踪
+- `stdout/stderr` - 输出捕获
+- `patch/diff` - 变更差异
+- `changed_paths` - 变更路径列表
+- `container_metadata` - 容器配置元数据
+- `policy/approval_linkage` - 策略与审批关联
+
+**原因**:
+- 明确每类操作的安全边界
+- 支持精细化策略治理
+- 完整审计追踪满足合规要求
 
 ---
 

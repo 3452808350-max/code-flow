@@ -21,7 +21,13 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from ..storage import PlatformStore
-from ..types import WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerState
+from ..types import (
+    WorkerHeartbeatRequest,
+    WorkerRegisterRequest,
+    WorkerSandboxStats,
+    WorkerSnapshot,
+    WorkerState,
+)
 from ..utils import new_id, utc_now
 
 
@@ -53,6 +59,10 @@ class WorkerRegistry:
         now = utc_now()
         role_suffix = request.role_profile or "general"
         worker_class = "sandboxed" if request.sandbox_ready else "general"
+        
+        # Initialize sandbox stats
+        sandbox_stats = WorkerSandboxStats()
+        
         snapshot = WorkerSnapshot(
             worker_id=request.worker_id or new_id("worker"),
             label=request.label,
@@ -74,6 +84,8 @@ class WorkerRegistry:
             current_lease_id=None,
             sandbox_backend=request.sandbox_backend,
             sandbox_ready=request.sandbox_ready,
+            sandbox_hardened_ready=request.sandbox_hardened_ready,
+            sandbox_stats=sandbox_stats,
             last_error=None,
             created_at=now,
             updated_at=now,
@@ -103,6 +115,45 @@ class WorkerRegistry:
         worker.updated_at = worker.heartbeat_at
         if worker.drain_state == "draining" and worker.current_lease_id:
             worker.state = "draining"
+        self._persist(worker)
+        return worker
+
+    def record_sandbox_execution(
+        self,
+        worker_id: str,
+        success: bool,
+        timed_out: bool = False,
+        policy_denied: bool = False,
+        approval_blocked: bool = False,
+        error: Optional[str] = None,
+    ) -> WorkerSnapshot:
+        """Record sandbox execution statistics for a worker."""
+        worker = self.get_worker(worker_id)
+        
+        # Initialize stats if not present
+        if worker.sandbox_stats is None:
+            worker.sandbox_stats = WorkerSandboxStats()
+        
+        # Update stats
+        worker.sandbox_stats.total_executions += 1
+        
+        if success:
+            worker.sandbox_stats.success_count += 1
+        else:
+            worker.sandbox_stats.failure_count += 1
+            worker.sandbox_stats.last_failure_at = utc_now()
+            worker.sandbox_stats.last_failure_reason = error
+        
+        if timed_out:
+            worker.sandbox_stats.timeout_count += 1
+        
+        if policy_denied:
+            worker.sandbox_stats.policy_denied_count += 1
+        
+        if approval_blocked:
+            worker.sandbox_stats.approval_blocked_count += 1
+        
+        worker.updated_at = utc_now()
         self._persist(worker)
         return worker
 

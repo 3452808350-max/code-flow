@@ -4,7 +4,74 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-from .base import SandboxMode, SandboxNetworkPolicy
+from .base import SandboxMode, SandboxNetworkPolicy, SideEffectClass
+
+
+class HardenedSandboxConfig(BaseModel):
+    """Hardened sandbox configuration applied to container."""
+    no_new_privileges: bool = True
+    cap_drop_all: bool = True
+    cap_add_whitelist: List[str] = Field(default_factory=list)
+    rootless_user: str = "1000:1000"
+    read_only_rootfs: bool = True
+    security_options: List[str] = Field(default_factory=list)
+
+
+class ExecutionTiming(BaseModel):
+    """Execution timing metadata."""
+    started_at: str
+    finished_at: str
+    duration_ms: int
+
+
+class MountInfo(BaseModel):
+    """Container mount information."""
+    source: str
+    destination: str
+    mode: str  # "ro" or "rw"
+    mount_type: str  # "bind" or "tmpfs"
+
+
+class ContainerMetadata(BaseModel):
+    """Container execution metadata for audit trails."""
+    container_id: str
+    image: str
+    created_at: str
+    started_at: str
+    finished_at: str
+    security_options: List[str] = Field(default_factory=list)
+    dropped_capabilities: List[str] = Field(default_factory=list)
+    added_capabilities: List[str] = Field(default_factory=list)
+    user: str = "root"
+    mounts: List[MountInfo] = Field(default_factory=list)
+    network_mode: str = "none"
+
+
+class SandboxEvidence(BaseModel):
+    """Complete evidence package from sandbox execution."""
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: Optional[int] = None
+    changed_paths: List[str] = Field(default_factory=list)
+    patch: str = ""  # unified diff
+    container_metadata: Optional[ContainerMetadata] = None
+    execution_timing: Optional[ExecutionTiming] = None
+
+
+class PolicyVerdictSnapshot(BaseModel):
+    """Policy verdict snapshot for sandbox trace."""
+    decision: str  # "allow", "approval_required", "deny"
+    subject: str
+    rule_id: Optional[str] = None
+    matched_rule: Optional[str] = None
+
+
+class ApprovalContext(BaseModel):
+    """Approval context for sandboxed mutations."""
+    approval_token: Optional[str] = None
+    approval_id: Optional[str] = None
+    decision: Optional[str] = None  # "approve", "approve_once", "deny"
+    used: bool = False
 
 
 class SandboxSpec(BaseModel):
@@ -17,10 +84,12 @@ class SandboxSpec(BaseModel):
     read_only_rootfs: bool = True
     timeout_seconds: int = 20
     approval_token: Optional[str] = None
+    # Hardened config
+    hardened_config: Optional[HardenedSandboxConfig] = None
 
 
 class SandboxTrace(BaseModel):
-    """Trace of sandbox execution."""
+    """Trace of sandbox execution with hardened audit trails."""
     sandbox_id: str
     sandbox_mode: SandboxMode = "docker"
     image: str
@@ -35,6 +104,12 @@ class SandboxTrace(BaseModel):
     ok: bool = False
     error: Optional[str] = None
     docker_command: List[str] = Field(default_factory=list)
+    # Hardened fields
+    side_effect_class: SideEffectClass = "sandboxed_read"
+    hardened_config: Optional[HardenedSandboxConfig] = None
+    evidence: Optional[SandboxEvidence] = None
+    policy_verdict: Optional[PolicyVerdictSnapshot] = None
+    approval_context: Optional[ApprovalContext] = None
 
 
 class SandboxResult(BaseModel):
@@ -51,8 +126,15 @@ class SandboxResult(BaseModel):
     error: Optional[str] = None
 
 
+class ProbeCheckResult(BaseModel):
+    """Individual probe check result for sandbox readiness."""
+    check: str
+    passed: bool
+    error: Optional[str] = None
+
+
 class SandboxStatus(BaseModel):
-    """Status of sandbox backend."""
+    """Status of sandbox backend with hardened readiness."""
     sandbox_backend: str = "docker"
     docker_ready: bool = False
     sandbox_image_ready: bool = False
@@ -61,6 +143,18 @@ class SandboxStatus(BaseModel):
     image: Optional[str] = None
     fallback_mode: bool = False
     last_probe_error: Optional[str] = None
+    last_probe_at: Optional[str] = None
+    # Hardened readiness
+    hardened_ready: bool = False
+    rootless_ready: bool = False
+    no_new_privileges_ready: bool = False
+    capability_drop_ready: bool = False
+    policy_enforcement_ready: bool = False
+    probe_checks: List[ProbeCheckResult] = Field(default_factory=list)
+    # Runtime stats
+    active_sandbox_count: int = 0
+    total_executions_24h: int = 0
+    failure_count_24h: int = 0
 
 
 class ToolCallRecord(BaseModel):

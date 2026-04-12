@@ -23,7 +23,7 @@
 - replayable execution traces, approval chain, and artifact indexing
 - switchable artifact backend with local filesystem and S3-compatible object storage (MinIO for dev, AWS S3 for production)
 - lease-driven remote-worker protocol with mission / attempt / lease visibility
-- Docker-backed sandbox boundary for high-risk tool execution
+- Hardened Docker sandbox boundary (rootless, no-new-privileges, capability drop) for high-risk tool execution with comprehensive audit trails
 - role-aware mission orchestration with handoff packets, review verdicts, and mission-phase visibility
 - offline replay / benchmark evaluation and strict candidate publish gate
 - multi-agent self-improvement loop that diagnoses traces, generates policy/workflow candidates, and auto-runs replay + benchmark gate checks
@@ -87,7 +87,7 @@ Open:
 
 - single-user local control plane only
 - lease-driven remote worker plane now runs against real Postgres + Redis and has been smoke-tested through `session -> run -> worker poll -> lease -> complete`; the local SQLite path survives only as an injected test store, not a runtime backend
-- sandboxing now uses Docker for high-risk tool paths, but it is still a single-host boundary rather than a production microVM or multi-tenant isolation layer
+- sandboxing uses hardened Docker (rootless, no-new-privileges, capability drop) for high-risk tool paths; it is a single-host hardened boundary ready for microVM abstraction, not yet multi-tenant isolation
 - custom natural-language constraints still resolve through heuristic policy behavior instead of rich semantic rule compilation
 - multi-agent orchestration is now role-aware and replayable, but it is still workflow-bounded rather than a fully autonomous swarm
 - self-improvement now diagnoses multi-agent traces and auto-evaluates candidates, but it still only optimizes policy/workflow versions rather than platform source code

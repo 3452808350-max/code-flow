@@ -217,6 +217,7 @@ class WorkerExecutionLoop:
                 execution_mode=execution_mode,
                 sandbox_backend=sandbox_status.sandbox_backend,
                 sandbox_ready=sandbox_status.docker_ready and sandbox_status.sandbox_image_ready,
+                sandbox_hardened_ready=sandbox_status.hardened_ready,
                 version=version,
             )
         )

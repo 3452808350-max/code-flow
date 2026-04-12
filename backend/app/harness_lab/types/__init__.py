@@ -31,6 +31,7 @@ from .base import (
     KnowledgeReindexScope,
     SandboxMode,
     SandboxNetworkPolicy,
+    SideEffectClass,
     AgentRole,
     ReviewDecision,
     FailureClusterSignatureType,
@@ -60,6 +61,7 @@ from .session_run import (
 # Worker and Lease types
 from .worker_lease import (
     WorkerSnapshot,
+    WorkerSandboxStats,
     Mission,
     TaskAttempt,
     WorkerLease,
@@ -118,6 +120,14 @@ from .sandbox import (
     SandboxResult,
     SandboxStatus,
     ToolCallRecord,
+    HardenedSandboxConfig,
+    SandboxEvidence,
+    ContainerMetadata,
+    ExecutionTiming,
+    MountInfo,
+    PolicyVerdictSnapshot,
+    ApprovalContext,
+    ProbeCheckResult,
 )
 
 # Improvement types
@@ -209,6 +219,7 @@ __all__ = [
     "KnowledgeReindexScope",
     "SandboxMode",
     "SandboxNetworkPolicy",
+    "SideEffectClass",
     "AgentRole",
     "ReviewDecision",
     "FailureClusterSignatureType",
@@ -232,6 +243,7 @@ __all__ = [
     "IntentRequest",
     # Worker/Lease
     "WorkerSnapshot",
+    "WorkerSandboxStats",
     "Mission",
     "TaskAttempt",
     "WorkerLease",
@@ -284,6 +296,14 @@ __all__ = [
     "SandboxResult",
     "SandboxStatus",
     "ToolCallRecord",
+    "HardenedSandboxConfig",
+    "SandboxEvidence",
+    "ContainerMetadata",
+    "ExecutionTiming",
+    "MountInfo",
+    "PolicyVerdictSnapshot",
+    "ApprovalContext",
+    "ProbeCheckResult",
     # Improvement
     "ImprovementCandidate",
     "CanaryScope",

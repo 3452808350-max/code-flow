@@ -377,6 +377,8 @@ class HarnessLabServices:
             warnings.append("Docker sandbox backend is not ready.")
         elif not sandbox["sandbox_image_ready"]:
             warnings.append(f"Sandbox image is missing: {sandbox['image']}.")
+        elif not sandbox.get("hardened_ready", False):
+            warnings.append("Docker sandbox is available but hardened configuration is not fully ready.")
         if not knowledge["ready"]:
             warnings.append("Knowledge index has not been built yet; retrieval will use live fallback search.")
         elif knowledge["fallback_mode"]:

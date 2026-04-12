@@ -64,6 +64,15 @@ KnowledgeSourceType = Literal["workspace", "docs", "artifacts"]
 KnowledgeReindexScope = Literal["workspace", "docs", "artifacts", "all"]
 SandboxMode = Literal["host_local", "docker"]
 SandboxNetworkPolicy = Literal["none", "restricted", "default"]
+
+# Side effect classification for hardened sandbox governance
+SideEffectClass = Literal[
+    "host_local_read",        # Host-local read operations (low risk)
+    "sandboxed_read",         # Sandboxed read operations (git status/diff)
+    "sandboxed_mutation",     # Sandboxed mutation (write_file with approval)
+    "denied_before_sandbox",  # Denied by policy before entering sandbox
+    "approval_blocked",       # Blocked waiting for operator approval
+]
 AgentRole = Literal["planner", "researcher", "executor", "reviewer", "recovery"]
 ReviewDecision = Literal["accept", "request_repair", "escalate", "complete"]
 FailureClusterSignatureType = Literal[
