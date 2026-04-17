@@ -227,6 +227,36 @@ curl -sSL ... | bash -s -- --control-plane-url http://xxx:4600 --role general --
 
 ---
 
+## 版本更新
+
+**一键更新（安全）**：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/3452808350-max/Harness-Lab/main/scripts/update.sh | bash
+```
+
+更新流程：
+- ✅ 检查当前版本 vs 最新版本
+- ✅ 显示更新内容
+- ✅ 自动拉取最新代码
+- ✅ 更新依赖（如有变化）
+- ✅ 重启服务
+
+**可选参数**：
+
+```bash
+# 只检查是否有更新
+curl -sSL .../update.sh | bash -s -- --check
+
+# 更新前创建备份
+curl -sSL .../update.sh | bash -s -- --backup
+
+# 强制更新（即使已是最新）
+curl -sSL .../update.sh | bash -s -- --force
+```
+
+---
+
 ## 快速回顾
 
 | 你要做什么 | 命令 |
@@ -237,6 +267,8 @@ curl -sSL ... | bash -s -- --control-plane-url http://xxx:4600 --role general --
 | 查看所有 Worker | `hlab worker list` |
 | 提交任务 | `hlab task submit --description "xxx"` |
 | 下线 Worker | `hlab worker drain <id>` |
+| **更新版本** | `curl ...update.sh | bash` |
+| **检查更新** | `curl ...update.sh | bash -s -- --check` |
 
 ---
 
