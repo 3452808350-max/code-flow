@@ -269,6 +269,9 @@ setup_project() {
         cd "$INSTALL_DIR"
     fi
     
+    # Ensure python3-venv is available (Ubuntu/Debian doesn't include it by default)
+    sudo apt-get install -y python3-venv
+    
     # Create venv
     if [ ! -d "venv" ]; then
         python3 -m venv venv
