@@ -4,11 +4,43 @@ import argparse
 import asyncio
 import json
 import os
+import socket
 import time
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+
+# Role templates for auto-pair functionality
+# Keys are template names (for CLI), role_profile maps to valid AgentRole values
+ROLE_TEMPLATES: dict[str, dict[str, Any]] = {
+    "general": {
+        "capabilities": ["filesystem", "git", "shell", "http_fetch"],
+        "labels": ["general"],
+        "description": "通用 worker，适合大多数任务",
+        "role_profile": "executor",  # Maps to valid AgentRole
+    },
+    "executor": {
+        "capabilities": ["filesystem", "git", "shell", "http_fetch", "sandbox"],
+        "labels": ["executor", "sandbox-ready"],
+        "description": "执行型 worker，可运行沙箱任务",
+        "role_profile": "executor",
+    },
+    "reviewer": {
+        "capabilities": ["filesystem", "git"],
+        "labels": ["reviewer"],
+        "description": "审核型 worker，只读权限",
+        "role_profile": "reviewer",
+    },
+    "planner": {
+        "capabilities": ["filesystem", "knowledge_search", "model_reflection"],
+        "labels": ["planner"],
+        "description": "规划型 worker，擅长分析和规划",
+        "role_profile": "planner",
+    },
+}
+
+AUTO_PAIR_DEFAULT_ROLE = "general"
 
 load_dotenv(Path(__file__).resolve().parents[3] / ".env")
 
@@ -71,6 +103,44 @@ def _get_socks5_proxy_url() -> str | None:
     if user and pass_:
         return f"socks5://{user}:{pass_}@{host}:{port}"
     return f"socks5://{host}:{port}"
+
+
+def _auto_detect_worker_config(role: str, label_override: str = "") -> dict[str, Any]:
+    """Auto-detect worker configuration based on role template and system state.
+
+    Args:
+        role: Role template name (general, executor, reviewer, planner).
+        label_override: Optional label override. If empty, auto-generates from hostname.
+
+    Returns:
+        Dictionary with auto-detected worker configuration.
+    """
+    template = ROLE_TEMPLATES.get(role, ROLE_TEMPLATES[AUTO_PAIR_DEFAULT_ROLE])
+
+    # Auto-detect label from hostname
+    label = label_override or f"{socket.gethostname()}-{role}"
+
+    # Auto-detect sandbox status
+    sandbox_status = harness_lab_services.sandbox.status()
+    sandbox_backend = sandbox_status.sandbox_backend
+    sandbox_ready = sandbox_status.executor_ready
+
+    # Adjust capabilities based on sandbox status for executor role
+    capabilities = list(template["capabilities"])  # Make a copy
+    if sandbox_ready and "sandbox" not in capabilities and role == "executor":
+        capabilities.append("sandbox")
+
+    # Use role_profile from template (maps to valid AgentRole)
+    role_profile = template.get("role_profile", role)
+
+    return {
+        "label": label,
+        "capabilities": capabilities,
+        "role_profile": role_profile,
+        "labels": template["labels"],
+        "sandbox_backend": sandbox_backend,
+        "sandbox_ready": sandbox_ready,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -167,6 +237,12 @@ def build_parser() -> argparse.ArgumentParser:
     worker_register.add_argument("--capability", action="append", default=[])
     worker_register.add_argument("--role-profile", default="")
     worker_register.add_argument("--control-plane-url", default="")
+
+    worker_auto_pair = worker_subparsers.add_parser("auto-pair", help="Auto-detect and register worker with optimal config")
+    worker_auto_pair.add_argument("--role", choices=list(ROLE_TEMPLATES.keys()), default=AUTO_PAIR_DEFAULT_ROLE, help="Role profile to use")
+    worker_auto_pair.add_argument("--label", default="", help="Override auto-detected label")
+    worker_auto_pair.add_argument("--control-plane-url", default="", help="Control plane URL (default: local registry)")
+    worker_auto_pair.add_argument("--dry-run", action="store_true", help="Show config without registering")
 
     worker_status = worker_subparsers.add_parser("status", help="Inspect worker status")
     worker_status.add_argument("--worker-id", default="")
@@ -557,6 +633,55 @@ def main() -> None:
                 )
             )
             _emit(worker.model_dump(), args.output_format)
+            return
+
+        if args.worker_command == "auto-pair":
+            config = _auto_detect_worker_config(args.role, args.label)
+
+            # Display detected configuration
+            if args.output_format == "text":
+                print("Auto-detected worker config:")
+                print(f"  Role: {config['role_profile']}")
+                print(f"  Label: {config['label']}")
+                print(f"  Capabilities: {config['capabilities']}")
+                print(f"  Labels: {config['labels']}")
+                print(f"  Sandbox: {config['sandbox_backend']} (ready: {config['sandbox_ready']})")
+
+            if args.dry_run:
+                if args.output_format == "text":
+                    print("(dry-run, not registered)")
+                else:
+                    _emit({"dry_run": True, "config": config}, args.output_format)
+                return
+
+            # Register worker
+            control_plane_url = args.control_plane_url.strip()
+            if control_plane_url:
+                client = WorkerRuntimeClient(control_plane_url, socks5_proxy_url=_get_socks5_proxy_url())
+                loop = WorkerExecutionLoop(client, poll_interval_seconds=1.0)
+                worker = loop.register(
+                    label=config["label"],
+                    capabilities=config["capabilities"],
+                    role_profile=config["role_profile"],
+                )
+            else:
+                worker = harness_lab_services.runtime.worker_registry.register_worker(
+                    WorkerRegisterRequest(
+                        label=config["label"],
+                        capabilities=config["capabilities"],
+                        role_profile=config["role_profile"],
+                        labels=config["labels"],
+                        sandbox_backend=config["sandbox_backend"],
+                        sandbox_ready=config["sandbox_ready"],
+                        version="v1",
+                    )
+                )
+
+            if args.output_format == "text":
+                print(f"✓ Registered: {worker.worker_id}")
+                print(f"✓ State: {worker.state}")
+            else:
+                _emit(worker.model_dump(), args.output_format)
             return
 
         if args.worker_command == "status":
