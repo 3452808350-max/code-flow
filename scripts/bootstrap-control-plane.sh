@@ -136,6 +136,11 @@ install_postgres() {
     
     # Add PostgreSQL apt repository
     sudo install -d /usr/share/keyrings
+    sudo install -d /etc/apt/sources.list.d
+    
+    # Remove old keyring if exists (avoid overwrite prompt)
+    sudo rm -f /usr/share/keyrings/postgresql-keyring.gpg
+    
     curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /usr/share/keyrings/postgresql-keyring.gpg
     
     echo "deb [signed-by=/usr/share/keyrings/postgresql-keyring.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | \
@@ -184,6 +189,13 @@ install_redis() {
         log_ok "Redis 7 already installed"
         return 0
     fi
+    
+    # Ensure directories exist
+    sudo install -d /usr/share/keyrings
+    sudo install -d /etc/apt/sources.list.d
+    
+    # Remove old keyring if exists (avoid overwrite prompt)
+    sudo rm -f /usr/share/keyrings/redis-keyring.gpg
     
     curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-keyring.gpg
     
