@@ -101,7 +101,13 @@ confirm() {
     fi
     
     echo -e "${YELLOW}Type 'yes' to confirm uninstall:${NC}"
-    read -r CONFIRM
+    
+    # Read from /dev/tty when stdin is piped (curl | bash)
+    if [ -t 0 ]; then
+        read -r CONFIRM
+    else
+        read -r CONFIRM < /dev/tty
+    fi
     
     if [ "$CONFIRM" != "yes" ]; then
         log_info "Uninstall cancelled"
