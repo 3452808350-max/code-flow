@@ -232,6 +232,11 @@ install_docker() {
     
     # Add Docker apt repository
     sudo install -m 0755 -d /etc/apt/keyrings
+    sudo install -d /etc/apt/sources.list.d
+    
+    # Remove old keyring if exists (avoid overwrite prompt)
+    sudo rm -f /etc/apt/keyrings/docker.gpg
+    
     curl -fsSL https://download.docker.com/linux/$OS/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     sudo chmod a+r /etc/apt/keyrings/docker.gpg
     
