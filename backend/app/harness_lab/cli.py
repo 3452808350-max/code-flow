@@ -281,7 +281,63 @@ def build_parser() -> argparse.ArgumentParser:
     runs_watch.add_argument("--once", action="store_true")
 
     subparsers.add_parser("serve", help="Start the FastAPI control plane")
+
+    # TUI commands for visual management
+    tui = subparsers.add_parser("tui", help="Launch Terminal User Interface for visual management")
+    tui_subparsers = tui.add_subparsers(dest="tui_command", required=True)
+
+    tui_control = tui_subparsers.add_parser("control", help="Control Plane TUI - monitor services, workers, tasks")
+    tui_control.add_argument("--port", type=int, default=4600, help="Control plane API port")
+    tui_control.add_argument("--api-url", default="", help="Full API URL (overrides --port)")
+    tui_control.add_argument("--theme", choices=["dark", "light"], default="dark", help="Color theme")
+
+    tui_worker = tui_subparsers.add_parser("worker", help="Worker TUI - local worker status and logs")
+    tui_worker.add_argument("--worker-id", default="", help="Worker ID to monitor")
+    tui_worker.add_argument("--control-plane-url", default="http://localhost:4600", help="Control plane URL")
+    tui_worker.add_argument("--theme", choices=["dark", "light"], default="dark", help="Color theme")
+
+    tui_status = tui_subparsers.add_parser("status", help="Quick status bar (non-interactive)")
+    tui_status.add_argument("--live", action="store_true", help="Continuous status updates")
+
     return parser
+
+
+def _show_status_bar(live: bool = False, api_url: str = "http://localhost:4600") -> None:
+    """Show non-interactive status bar (Rich-based).
+
+    Args:
+        live: Whether to continuously update
+        api_url: Control plane API URL
+    """
+    from rich.console import Console
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.table import Table
+    import time
+
+    console = Console()
+
+    def render_status() -> Panel:
+        """Render status panel."""
+        table = Table.grid(padding=1)
+        table.add_column("Label", style="cyan")
+        table.add_column("Value")
+
+        table.add_row("API", api_url)
+        table.add_row("Mode", "control-plane")
+        table.add_row("Status", "🟢 Running")
+
+        return Panel(table, title="Harness Lab Status", border_style="cyan")
+
+    if live:
+        with Live(render_status(), console=console, refresh_per_second=1):
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                pass
+    else:
+        console.print(render_status())
 
 
 def main() -> None:
@@ -781,6 +837,25 @@ def main() -> None:
         from backend.app.main import main as serve_main
 
         serve_main()
+        return
+
+    if args.command == "tui":
+        from backend.app.harness_lab.tui import HarnessLabTUI, ColorTheme
+
+        if args.tui_command == "control":
+            # Get theme
+            theme = ColorTheme.dark() if getattr(args, 'theme', 'dark') == "dark" else ColorTheme.light()
+            # Get API URL
+            api_url = args.api_url or f"http://localhost:{args.port}"
+            app = HarnessLabTUI(mode="control", theme=theme, api_url=api_url)
+            app.run()
+        elif args.tui_command == "worker":
+            theme = ColorTheme.dark() if getattr(args, 'theme', 'dark') == "dark" else ColorTheme.light()
+            app = HarnessLabTUI(mode="worker", theme=theme, api_url=args.control_plane_url)
+            app.run()
+        elif args.tui_command == "status":
+            # Non-interactive status bar
+            _show_status_bar(live=args.live, api_url=f"http://localhost:4600")
         return
 
 
