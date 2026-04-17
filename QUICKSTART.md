@@ -74,6 +74,39 @@ cd ~/.harness-lab
 ./venv/bin/hlab task list
 ```
 
+### 可视化 TUI 界面
+
+Harness Lab 提供交互式 TUI（Terminal User Interface）进行可视化管理：
+
+```bash
+# 启动控制平面 TUI（全屏交互式）
+./venv/bin/hlab tui control
+
+# 指定端口或 API 地址
+./venv/bin/hlab tui control --port 4600
+./venv/bin/hlab tui control --api-url http://localhost:4600
+
+# 浅色主题
+./venv/bin/hlab tui control --theme light
+
+# Worker 端 TUI（在 worker 机器上运行）
+./venv/bin/hlab tui worker --control-plane-url http://控制平面IP:4600
+
+# 快速状态栏（非交互式，适合脚本）
+./venv/bin/hlab tui status
+./venv/bin/hlab tui status --live  # 持续更新
+```
+
+**TUI 快捷键**（控制平面）：
+| 按键 | 功能 |
+|------|------|
+| `Ctrl+H` | 显示帮助 |
+| `d` | Drain 选中 worker |
+| `r` | Resume 选中 worker |
+| `i` | 查看 worker 详情 |
+| `l` | 切换日志显示 |
+| `ESC` / `q` | 退出 |
+
 ### 提交任务
 
 ```bash
