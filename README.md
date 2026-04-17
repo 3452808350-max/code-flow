@@ -2,86 +2,99 @@
 
 Harness Lab 是一个研究优先、可回放、面向生产化演进的多 agent 平台。它不是旧工作流产品，也还不是最终形态的 agent 云，但当前已经具备一条完整的控制平面、执行边界、约束治理和前端工作台链路。
 
-## What It Is
+## 核心特性
 
-- `backend/app/harness_lab/context`: 分层 context 管理
-- `backend/app/harness_lab/constraints`: 自然语言约束解析、编译与 policy verdict
-- `backend/app/harness_lab/boundary`: sandbox 执行边界、patch staging、workspace 审计
-- `backend/app/harness_lab/fleet`: worker、lease、dispatch、协议和适配层
-- `backend/app/harness_lab/runtime`: session / run / mission / attempt / lease runtime
-- `backend/app/harness_lab/improvement`: candidate、eval harness、publish gate、canary
-- `backend/app/harness_lab/control_plane`: sessions、runs、workers、leases、replays、evals API
-- `backend/app/harness_lab/orchestrator`: task graph 与 wave-ready 调度
-- `frontend/src/lab`: Harness Lab mission-control workbench
+| 特性 | 说明 |
+|------|------|
+| **Session-first 工作流** | 以 session 为核心的研究型工作流 |
+| **分层 Context 管理** | Token-budget 分层上下文裁剪 |
+| **自然语言约束** | deny-before-allow verdict 约束治理 |
+| **可回放执行追踪** | Approval chain、artifact indexing |
+| **多存储后端** | 本地文件系统 + S3/MinIO |
+| **远程 Worker 协议** | Lease-driven polling + heartbeat |
+| **可插拔 Sandbox** | Docker (生产) / MicroVM (VM 隔离) / Stub (测试) |
+| **自我改进循环** | Trace 诊断 → Candidate 生成 → Benchmark 验证 |
+| **SOCKS5 安全代理** | Worker 远程通信安全隧道 (新增) |
 
-## Core Capabilities
+---
 
-- session-first research workflow
-- provider-backed intent / reflection with heuristic fallback
-- layered context blocks with token-budget trimming
-- natural-language constraints with deny-before-allow verdicts
-- fixed prompt frame ordering
-- replayable execution traces, approval chain, and artifact indexing
-- artifact storage with local filesystem and S3-compatible backends
-- lease-driven remote-worker protocol with mission / attempt / lease visibility
-- pluggable sandbox execution backend through `SandboxExecutor`
-  - `docker` default backend with hardened container settings
-  - `microvm` real local runner backend with readiness probes and VM trace metadata
-  - `microvm_stub` fallback backend for compatibility checks and tests
-- role-aware mission orchestration with handoff packets and review verdicts
-- offline replay / benchmark evaluation and strict candidate publish gate
-- multi-agent self-improvement loop that diagnoses traces, generates candidates, and runs replay / benchmark checks
+## 架构设计
 
-## Repository Layout
+### 核心模块
 
-```text
-backend/
-  app/harness_lab/
-    boundary/
-    control_plane/
-    context/
-    constraints/
-    fleet/
-    improvement/
-    orchestrator/
-    runtime/
-    types/
-  tests/
-frontend/
-docker/
+```
+backend/app/harness_lab/
+├── context/          # 分层 context 管理
+├── constraints/      # 自然语言约束解析、编译与 policy verdict
+├── boundary/         # Sandbox 执行边界、patch staging、workspace 审计
+├── fleet/            # Worker、Lease、Dispatch 协议和适配层
+├── runtime/          # Session / Run / Mission / Attempt / Lease runtime
+├── improvement/      # Candidate、Eval harness、Publish gate、Canary
+├── control_plane/    # Sessions、Runs、Workers、Leases API
+├── orchestrator/     # Task graph 与 wave-ready 调度
+├── knowledge/        # 知识库索引与搜索
+├── workers/          # WorkerRuntimeClient + SOCKS5 支持
+└── types/            # 类型定义
 ```
 
-## Requirements
+### Sandbox 执行后端
+
+| 后端 | 用途 | 特点 |
+|------|------|------|
+| `docker` | 生产级默认 | 硬化容器设置，rootless 支持 |
+| `microvm` | VM 风格隔离 | 真正的本地 VM runner，readiness probes |
+| `microvm_stub` | 测试兼容 | 不启动真实 VM，用于 CI/CD |
+
+### Artifact 存储后端
+
+| 后端 | 用途 | 配置 |
+|------|------|------|
+| `local` | 本地文件系统 | `HARNESS_ARTIFACT_ROOT` |
+| `s3` | S3/MinIO 对象存储 | `HARNESS_S3_ENDPOINT`, `HARNESS_S3_BUCKET` |
+
+### Worker 远程执行协议
+
+```
+Control Plane ←── Lease Polling ──→ Worker
+                │
+                ├── Heartbeat (健康检查)
+                ├── Dispatch (任务分发)
+                └── Status Update (状态同步)
+```
+
+---
+
+## 安装与配置
+
+### 系统需求
 
 - Python 3.11+
 - Node.js 18+
-- Docker and Docker Compose
-- Postgres and Redis for runtime state
+- Docker + Docker Compose
+- PostgreSQL + Redis
 
-## Local Development
-
-### 1. Start infrastructure
+### 1. 启动基础设施
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d harness-lab-postgres harness-lab-redis harness-lab-minio
 ```
 
-The full compose stack also brings up the backend and frontend:
+完整栈启动：
 
 ```bash
 docker compose -f docker/docker-compose.yml up -d
 ```
 
-### 2. Configure environment
+### 2. 环境配置
 
-At minimum, set these variables:
+**必需变量：**
 
 ```bash
 export HARNESS_DB_URL=postgresql://harness_lab:harness_lab@127.0.0.1:5432/harness_lab
 export HARNESS_REDIS_URL=redis://127.0.0.1:6379/0
 ```
 
-Optional but commonly used:
+**常用配置：**
 
 ```bash
 export HARNESS_SANDBOX_BACKEND=docker
@@ -90,74 +103,216 @@ export HARNESS_ARTIFACT_ROOT=backend/data/harness_lab/artifacts
 export HARNESS_WORKER_POLL_INTERVAL=1.0
 ```
 
-For the local MicroVM runner:
+**模型配置：**
 
 ```bash
-export HARNESS_SANDBOX_BACKEND=microvm
-export HARNESS_MICROVM_BINARY=python3
-export HARNESS_MICROVM_KERNEL_IMAGE=backend/data/harness_lab/microvm/vmlinux.bin
-export HARNESS_MICROVM_ROOTFS_IMAGE=backend/data/harness_lab/microvm/rootfs.img
-export HARNESS_MICROVM_WORKDIR=backend/data/harness_lab/microvm/workdir
+export HARNESS_LAB_MODEL_PROVIDER=deepseek
+export HARNESS_LAB_MODEL_NAME=deepseek-chat
 ```
 
-### 3. Run the backend
+### 3. SOCKS5 代理配置 (新增)
+
+Worker 与 Control Plane 的远程安全通信支持 SOCKS5 代理：
+
+```bash
+export HARNESS_SOCKS5_PROXY_HOST=127.0.0.1
+export HARNESS_SOCKS5_PROXY_PORT=1080
+export HARNESS_SOCKS5_PROXY_USER=username   # 可选
+export HARNESS_SOCKS5_PROXY_PASS=password   # 可选
+```
+
+安装可选依赖：
+
+```bash
+pip install pysocks
+```
+
+**HTTPS Control Plane（可选）：**
+
+```bash
+export HARNESS_USE_HTTPS=true
+export HARNESS_CONTROL_PLANE_URL=https://your-control-plane.example.com
+```
+
+### 4. Sandbox 安全配置
+
+```bash
+export HARNESS_SANDBOX_ROOTLESS_USER=1000:1000
+export HARNESS_SANDBOX_NO_NEW_PRIVILEGES=true
+export HARNESS_SANDBOX_CAP_DROP_ALL=true
+```
+
+### 5. 运行服务
+
+**后端：**
 
 ```bash
 python3 -m backend.app.main
+# API: http://localhost:4600
+# Docs: http://localhost:4600/docs
 ```
 
-The API listens on `http://localhost:4600` and exposes docs at `http://localhost:4600/docs`.
-
-You can also use the CLI entrypoint:
-
-```bash
-python3 -m backend.app.harness_lab.cli serve
-```
-
-### 4. Run the frontend
+**前端：**
 
 ```bash
 cd frontend
 npm install
 npm run dev
+# Workbench: http://localhost:3000
 ```
 
-The workbench opens at `http://localhost:3000`.
+---
 
-### 5. Run a worker daemon
+## CLI 命令参考
+
+### 基础命令
+
+| 命令 | 说明 |
+|------|------|
+| `hlab doctor` | 系统健康检查 |
+| `hlab fleet` | Worker 集群状态 |
+| `hlab queue inspect` | 任务队列检查 |
+
+### Sandbox 命令
+
+| 命令 | 说明 |
+|------|------|
+| `hlab sandbox probe` | Sandbox 后端探测 |
+| `hlab sandbox backend` | 当前后端状态 |
+
+### Session/Run 命令
+
+| 命令 | 说明 |
+|------|------|
+| `hlab submit <goal>` | 创建 session 并执行 run |
+| `hlab runs watch [--run-id ID]` | 监控 run 执行状态 |
+| `hlab runs list` | 列出所有 runs |
+| `hlab replays <run-id>` | 回放执行追踪 |
+
+### Worker 命令
+
+| 命令 | 说明 |
+|------|------|
+| `hlab worker register [--label NAME]` | 注册新 Worker |
+| `hlab worker status <worker-id>` | Worker 详细状态 |
+| `hlab worker drain <worker-id>` | 暂停 Worker 任务 |
+| `hlab worker resume <worker-id>` | 恢复 Worker |
+| `hlab worker serve [--once]` | 启动 Worker daemon |
+
+**远程 Worker（含 SOCKS5）：**
 
 ```bash
-python3 -m backend.app.harness_lab.cli worker serve --label cli-worker
+export HARNESS_SOCKS5_PROXY_HOST=proxy.example.com
+export HARNESS_SOCKS5_PROXY_PORT=1080
+
+hlab worker serve \
+  --control-plane-url http://remote-control-plane:4600 \
+  --label remote-worker
 ```
 
-## Useful CLI Commands
+### Knowledge 命令
+
+| 命令 | 说明 |
+|------|------|
+| `hlab knowledge reindex [--scope SCOPE]` | 知识库重新索引 |
+| `hlab knowledge search <query>` | 知识库搜索 |
+
+### Canary/Improvement 命令
+
+| 命令 | 说明 |
+|------|------|
+| `hlab canary start <policy-id>` | 启动 Canary rollout |
+| `hlab canary status` | Canary 状态 |
+| `hlab canary promote` | 推进 Canary |
+| `hlab canary analyze` | 分析 Canary 结果 |
+| `hlab candidates` | 列出改进候选 |
+| `hlab promote <candidate-id>` | 发布候选 |
+| `hlab rollback <candidate-id>` | 回滚候选 |
+
+### Eval 命令
+
+| 命令 | 说明 |
+|------|------|
+| `hlab eval --suite replay` | 回放评估 |
+| `hlab eval --suite benchmark` | Benchmark 评估 |
+
+---
+
+## 使用示例
+
+### 端到端工作流
 
 ```bash
-python3 -m backend.app.harness_lab.cli doctor
-python3 -m backend.app.harness_lab.cli sandbox probe
-python3 -m backend.app.harness_lab.cli sandbox backend
-python3 -m backend.app.harness_lab.cli queue inspect
-python3 -m backend.app.harness_lab.cli leases
-python3 -m backend.app.harness_lab.cli workers
-python3 -m backend.app.harness_lab.cli eval --suite replay
+# 1. 检查系统状态
+hlab doctor
+
+# 2. 启动 Worker
+hlab worker serve --label local-worker
+
+# 3. 提交任务
+hlab submit "分析 backend/app/harness_lab 的架构设计"
+
+# 4. 监控执行
+hlab runs watch
+
+# 5. 回放追踪
+hlab replays <run-id>
 ```
 
-## Test Matrix
+### 远程 Worker 示例
 
 ```bash
-# Backend regression
+# 配置 SOCKS5 代理
+export HARNESS_SOCKS5_PROXY_HOST=192.168.1.100
+export HARNESS_SOCKS5_PROXY_PORT=1080
+
+# 连接远程 Control Plane
+hlab worker serve \
+  --control-plane-url http://control-plane.example.com:4600 \
+  --label remote-worker-01 \
+  --capabilities code,analysis
+
+# 查看远程 Worker 状态
+hlab worker status <worker-id> --control-plane-url http://control-plane.example.com:4600
+```
+
+### Canary Rollout 示例
+
+```bash
+# 启动 Canary（10% 流量）
+hlab canary start policy-v2 --scope percentage --value 10
+
+# 监控 Canary
+hlab canary status
+
+# 分析结果
+hlab canary analyze
+
+# 推进或回滚
+hlab canary promote  # 100% 流量
+hlab rollback <candidate-id>  # 回滚
+```
+
+---
+
+## 测试
+
+### 后端测试
+
+```bash
+# 全量回归
 pytest backend/tests -q
 
-# Focused sandbox + platform regression
+# Sandbox + Platform
 pytest backend/tests/unit/test_sandbox_hardening.py \
   backend/tests/unit/test_microvm_executor.py \
   backend/tests/test_harness_lab_platform.py -q
 
-# Integration checks
+# 集成测试
 pytest backend/tests/integration -q
 ```
 
-Frontend checks:
+### 前端测试
 
 ```bash
 cd frontend
@@ -166,16 +321,32 @@ npm run lint
 npm test
 ```
 
-## Current Limits
+---
 
-- single-user local control plane only
-- runtime state requires Postgres + Redis; SQLite is no longer supported for runtime state
-- sandboxing supports `docker`, `microvm`, and `microvm_stub`, but the real `microvm` backend is still a local runner rather than a full multi-tenant VM fabric
-- semantic constraints are governed through a dedicated engine with deny-before-allow verdicts, but the authoring and rollout UX can still be deepened
-- multi-agent orchestration is role-aware and replayable, but still workflow-bounded rather than fully autonomous
-- self-improvement currently optimizes policy/workflow versions rather than the platform source tree itself
+## 当前限制
 
-## See Also
+- 单用户本地 Control Plane
+- 运行时状态需要 PostgreSQL + Redis（不再支持 SQLite）
+- MicroVM 后端仍是本地 runner，非多租户 VM fabric
+- 语义约束通过 deny-before-allow engine，但 authoring UX 待深化
+- 多 Agent orchestration 仍为 workflow-bounded，非完全自主
+- 自我改进目前优化 policy/workflow 版本，而非平台源码本身
 
-- [Maintenance notes](MAINTENANCE.md)
-- [Frontend README](frontend/README.md)
+---
+
+## 文档索引
+
+| 文档 | 说明 |
+|------|------|
+| [MAINTENANCE.md](MAINTENANCE.md) | 维护笔记 |
+| [frontend/README.md](frontend/README.md) | 前端文档 |
+
+---
+
+## License
+
+MIT License
+
+---
+
+*Harness Lab - 研究优先、可回放、面向生产化演进的多 Agent 平台*
