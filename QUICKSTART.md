@@ -257,18 +257,55 @@ curl -sSL .../update.sh | bash -s -- --force
 
 ---
 
+---
+
+## 安全删除
+
+**卸载 Harness Lab（安全）**：
+
+```bash
+curl -sSL https://raw.githubusercontent.com/3452808350-max/Harness-Lab/main/scripts/uninstall.sh | bash
+```
+
+卸载流程：
+- ✅ 确认提示（输入 `yes`）
+- ✅ 自动备份数据
+- ✅ 停止服务
+- ✅ 导出数据库
+- ✅ 删除文件
+
+**可选参数**：
+
+```bash
+# 保留数据库和 Redis 数据
+curl -sSL .../uninstall.sh | bash -s -- --keep-data
+
+# 保留配置文件
+curl -sSL .../uninstall.sh | bash -s -- --keep-config
+
+# 保留数据和配置
+curl -sSL .../uninstall.sh | bash -s -- --keep-data --keep-config
+
+# 跳过确认（危险！）
+curl -sSL .../uninstall.sh | bash -s -- --force
+```
+
+---
+
 ## 快速回顾
 
 | 你要做什么 | 命令 |
 |-----------|------|
-| 部署控制平面 | `curl ...bootstrap-control-plane.sh | bash` |
-| 部署 Worker | `curl ...bootstrap-worker.sh | bash -s -- --control-plane-url http://IP:4600` |
+| 部署控制平面 | `curl ...bootstrap-control-plane.sh \| bash` |
+| 部署 Worker | `curl ...bootstrap-worker.sh \| bash -s -- --control-plane-url http://IP:4600` |
 | 查看服务状态 | `sudo systemctl status harness-lab` |
 | 查看所有 Worker | `hlab worker list` |
 | 提交任务 | `hlab task submit --description "xxx"` |
 | 下线 Worker | `hlab worker drain <id>` |
-| **更新版本** | `curl ...update.sh | bash` |
-| **检查更新** | `curl ...update.sh | bash -s -- --check` |
+| **更新版本** | `curl ...update.sh \| bash` |
+| **检查更新** | `curl ...update.sh \| bash -s -- --check` |
+| **卸载系统** | `curl ...uninstall.sh \| bash` |
+| **保留数据卸载** | `curl ...uninstall.sh \| bash -s -- --keep-data` |
 
 ---
 
@@ -277,3 +314,4 @@ curl -sSL .../update.sh | bash -s -- --force
 - 日志：`sudo journalctl -u harness-lab -f`
 - 健康检查：`curl http://IP:4600/health`
 - 重启服务：`sudo systemctl restart harness-lab`
+- 卸载：`curl ...uninstall.sh | bash --keep-data`
