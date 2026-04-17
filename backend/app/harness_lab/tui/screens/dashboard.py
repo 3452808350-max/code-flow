@@ -19,9 +19,10 @@ from textual.containers import Container, Horizontal
 from textual.app import ComposeResult
 from textual.reactive import reactive
 
-from ..widgets import ServicePanel, WorkerTable, StatusBar, EventStream
+from ..widgets import ServicePanel, WorkerTable, StatusBar, EventStream, QueuePanel
 from ..theme import ColorTheme
 from ..api_client import ControlPlaneClient, APIConfig
+from .workers import WorkerDetailScreen
 
 
 class DashboardScreen(Screen):
@@ -58,6 +59,18 @@ class DashboardScreen(Screen):
     
     DashboardScreen > Horizontal {
         height: 1fr;
+    }
+    
+    DashboardScreen #service-panel {
+        width: 25;
+    }
+    
+    DashboardScreen #queue-panel {
+        width: 30;
+    }
+    
+    DashboardScreen #worker-table {
+        width: 1fr;
     }
     
     DashboardScreen > EventStream {
@@ -118,6 +131,7 @@ class DashboardScreen(Screen):
         with Container(id="main"):
             with Horizontal(id="top-panels"):
                 yield ServicePanel(self.theme, id="service-panel")
+                yield QueuePanel(self.theme, id="queue-panel")
                 yield WorkerTable(self.theme, id="worker-table")
             
             yield EventStream(self.theme, id="event-stream")
@@ -242,8 +256,8 @@ class DashboardScreen(Screen):
         """Poll control plane API for status updates.
         
         When connected:
-        - Fetch health and workers data in parallel
-        - Update ServicePanel, WorkerTable, StatusBar
+        - Fetch health, workers, and queues data in parallel
+        - Update ServicePanel, WorkerTable, QueuePanel, StatusBar
         - Handle connection errors gracefully
         """
         if not self._api_connected or not self._api_client:
@@ -252,12 +266,13 @@ class DashboardScreen(Screen):
             return
         
         try:
-            # Fetch health and workers in parallel
+            # Fetch health, workers, and queues in parallel
             health_task = asyncio.create_task(self._api_client.get_health())
             workers_task = asyncio.create_task(self._api_client.list_workers())
+            queues_task = asyncio.create_task(self._api_client.get_queues())
             
-            health_data, workers_data = await asyncio.gather(
-                health_task, workers_task, return_exceptions=True
+            health_data, workers_data, queues_data = await asyncio.gather(
+                health_task, workers_task, queues_task, return_exceptions=True
             )
             
             # Handle health data
@@ -281,6 +296,17 @@ class DashboardScreen(Screen):
                 )
             else:
                 self._sync_workers(workers_data)
+            
+            # Handle queues data
+            if isinstance(queues_data, Exception):
+                events = self.query_one("#event-stream", EventStream)
+                events.add_event(
+                    datetime.now().strftime("%H:%M:%S"),
+                    "ERROR",
+                    f"Queue fetch failed: {str(queues_data)}"
+                )
+            else:
+                self._update_queues(queues_data)
             
         except Exception as e:
             events = self.query_one("#event-stream", EventStream)
@@ -324,6 +350,16 @@ class DashboardScreen(Screen):
         ready_queue = health_data.get("ready_queue_depth", 0)
         if ready_queue > 0:
             self.tasks_count = ready_queue
+    
+    def _update_queues(self, queues_data: List[Dict]) -> None:
+        """Update queue panel based on queue data."""
+        queues_panel = self.query_one("#queue-panel", QueuePanel)
+        queues_panel.update_shards(queues_data)
+        
+        # Update tasks count from queue depth
+        total_depth = queues_panel.get_total_depth()
+        if total_depth > 0:
+            self.tasks_count = total_depth
     
     def _sync_workers(self, workers_data: List[Dict]) -> None:
         """Sync worker table with API data.
@@ -563,8 +599,7 @@ class DashboardScreen(Screen):
             workers_table.update_worker(worker_id, "idle")
     
     def action_inspect_worker(self) -> None:
-        """Inspect selected worker."""
-        # TODO: Implement worker inspection screen
+        """Navigate to worker detail screen."""
         workers_table = self.query_one("#worker-table", WorkerTable)
         
         # Get selected worker
@@ -578,13 +613,32 @@ class DashboardScreen(Screen):
             )
             return
         
-        # TODO: Push worker detail screen
-        events = self.query_one("#event-stream", EventStream)
-        events.add_event(
-            datetime.now().strftime("%H:%M:%S"),
-            "INFO",
-            "Inspect worker (not implemented)"
+        # Get worker ID from cache (ordered by row)
+        worker_ids = list(self._workers_cache.keys())
+        if cursor_row >= len(worker_ids):
+            events = self.query_one("#event-stream", EventStream)
+            events.add_event(
+                datetime.now().strftime("%H:%M:%S"),
+                "ERROR",
+                "Invalid worker selection"
+            )
+            return
+        
+        worker_id = worker_ids[cursor_row]
+        
+        # Push worker detail screen
+        self.app.push_screen(
+            WorkerDetailScreen(
+                worker_id=worker_id,
+                api_client=self._api_client,
+                theme=self.theme
+            )
         )
+    
+    def on_screen_resume(self) -> None:
+        """Refresh data when returning from a sub-screen."""
+        # Trigger immediate refresh after returning from worker detail screen
+        asyncio.create_task(self._poll_status())
     
     def action_toggle_logs(self) -> None:
         """Toggle log visibility."""
